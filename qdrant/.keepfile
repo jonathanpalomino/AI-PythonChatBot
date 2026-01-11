@@ -1,0 +1,94 @@
+# =============================================================================
+# .gitignore
+# Files and directories to ignore in git
+# =============================================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Data directories
+data/uploads/*
+!data/uploads/.gitkeep
+data/vault/*
+!data/vault/.gitkeep
+data/sync_tracking.json
+
+# Logs
+*.log
+logs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Alembic
+alembic/versions/*.pyc
+
+# Documentation
+docs/_build/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+/qdrant/storage
+/qdrant/snapshots
+/qdrant/static
+/qdrant/.qdrant-initialized
+/data
+/redis
