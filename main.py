@@ -10,6 +10,7 @@ import platform
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import List
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,10 +19,12 @@ from fastapi.responses import JSONResponse
 from src.config.settings import settings
 from src.database.connection import init_db, close_db_connections
 from src.tools.base_tool import tool_registry
-from src.tools.rag_tool import RAGTool
+from src.tools.codebase_tool import CodebaseTool
 from src.tools.http_tool import HTTPTool
+from src.tools.obsidian_note_tool import ObsidianNoteTool  # New: Obsidian vault loader
+from src.tools.rag_tool import RAGTool
 from src.tools.sql_tool import SQLTool
-from src.tools.custom_tool import CustomToolExecutor
+from src.utils.health_checker import HealthChecker
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -33,6 +36,15 @@ from src.api.v1 import conversations, messages, prompts, files, collections, too
 qdrant_process = None
 # Global variable to hold Redis process
 redis_process = None
+# Global variable to hold Celery worker process
+celery_worker_process = None
+# Global variable to hold Celery flower process
+celery_flower_process = None
+# Flags to track if the app started the services (to avoid stopping external ones)
+app_started_qdrant = False
+app_started_redis = False
+app_started_celery_worker = False
+app_started_celery_flower = False
 
 
 # =============================================================================
@@ -44,25 +56,7 @@ def check_redis_health() -> bool:
     Check if Redis is already running and accessible
     Returns True if Redis is healthy, False otherwise
     """
-    import socket
-
-    try:
-        # Create a socket object
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            # Set a timeout for the connection attempt
-            s.settimeout(1)
-            # Try to connect to localhost on port 6379 (default Redis port)
-            result = s.connect_ex(('127.0.0.1', 6379))
-
-            if result == 0:
-                # logger.info("Redis is running (port 6379 is open)")
-                return True
-
-    except Exception as e:
-        logger.debug(f"Redis health check failed: {e}")
-        pass
-
-    return False
+    return HealthChecker.check_socket('127.0.0.1', 6379, timeout=1)
 
 
 def start_redis_windows():
@@ -118,7 +112,7 @@ def start_redis_windows():
 
         print("\n⚠️  Redis start script launched but health check timed out")
         print("   Please check the Redis console window for errors.")
-        return True # Return True anyway clearly the user can see errors now
+        return False
 
     except Exception as e:
         logger.error(f"Failed to start Redis: {e}", exc_info=True)
@@ -158,6 +152,9 @@ def stop_redis():
     """
     global redis_process
 
+    if not app_started_redis:
+        return
+
     if redis_process is None:
         return
 
@@ -192,6 +189,192 @@ def stop_redis():
 
 
 
+# =============================================================================
+# Celery Process Management
+# =============================================================================
+
+def start_celery_worker_windows():
+    """
+    Start Celery Worker on Windows using celery\\start_worker.bat
+    Opens a separate console window
+    """
+    global celery_worker_process, app_started_celery_worker
+
+    celery_dir = Path(__file__).parent / "celery"
+    celery_worker_bat = celery_dir / "start_worker.bat"
+
+    if not celery_worker_bat.exists():
+        logger.warning(f"Celery worker start script not found at: {celery_worker_bat}")
+        print(f"WARNING: Celery worker start script not found at: {celery_worker_bat}")
+        print("Please start Celery Worker manually")
+        return False
+
+    try:
+        logger.info(f"Attempting to start Celery Worker from: {celery_worker_bat}")
+        print("Starting Celery Worker...")
+
+        celery_worker_process = subprocess.Popen(
+            ["cmd.exe", "/c", str(celery_worker_bat.name)],
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+            cwd=str(celery_dir)
+        )
+
+        logger.info(f"Celery Worker start script launched (PID: {celery_worker_process.pid})")
+        print("Celery Worker started")
+        app_started_celery_worker = True
+
+        # Register cleanup on exit (best effort)
+        atexit.register(stop_celery_worker)
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to start Celery Worker: {e}", exc_info=True)
+        print(f"Failed to start Celery Worker: {e}")
+        return False
+
+
+def start_celery_flower_windows():
+    """
+    Start Flower Monitor on Windows using celery\\start_flower.bat
+    Opens a separate console window
+    """
+    global celery_flower_process, app_started_celery_flower
+
+    celery_dir = Path(__file__).parent / "celery"
+    celery_flower_bat = celery_dir / "start_flower.bat"
+
+    if not celery_flower_bat.exists():
+        logger.warning(f"Flower start script not found at: {celery_flower_bat}")
+        print(f"WARNING: Flower start script not found at: {celery_flower_bat}")
+        print("Please start Flower manually")
+        return False
+
+    try:
+        logger.info(f"Attempting to start Flower from: {celery_flower_bat}")
+        print("Starting Flower Monitor...")
+
+        celery_flower_process = subprocess.Popen(
+            ["cmd.exe", "/c", str(celery_flower_bat.name)],
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+            cwd=str(celery_dir)
+        )
+
+        logger.info(f"Flower start script launched (PID: {celery_flower_process.pid})")
+        print("Flower Monitor started")
+        app_started_celery_flower = True
+
+        # Register cleanup on exit (best effort)
+        atexit.register(stop_celery_flower)
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to start Flower: {e}", exc_info=True)
+        print(f"Failed to start Flower: {e}")
+        return False
+
+
+def ensure_celery_running():
+    """
+    Ensure Celery Worker and Flower are running
+    Checks each service separately and starts only what's needed
+    """
+    logger.info("Checking Celery services availability...")
+
+    worker_running = HealthChecker.check_celery_worker()
+    flower_running = HealthChecker.check_celery_flower(port=5555)
+
+    if worker_running and flower_running:
+        logger.info("Both Celery Worker and Flower are already running")
+        print("✅ Celery Worker and Flower are already running")
+        return True
+
+    system = platform.system()
+    if system != "Windows":
+        logger.info(f"Auto-start for Celery not implemented for {system}, please start manually.")
+        print(f"INFO: Celery auto-start only available on Windows. Please start manually if not running.")
+        return False
+
+    # Start Worker if not running
+    if not worker_running:
+        logger.info("Celery Worker is not running, attempting to start it...")
+        print("🔄 Celery Worker is not running, attempting to start it...")
+        if not start_celery_worker_windows():
+            return False
+    else:
+        logger.info("Celery Worker is already running")
+        print("✅ Celery Worker is already running")
+
+    # Start Flower if not running
+    if not flower_running:
+        logger.info("Flower is not running, attempting to start it...")
+        print("🔄 Flower is not running, attempting to start it...")
+        if not start_celery_flower_windows():
+            return False
+    else:
+        logger.info("Flower is already running")
+        print("✅ Flower is already running")
+
+    return True
+
+
+def stop_celery_worker():
+    """
+    Stop Celery Worker (best effort, only if we started it)
+    """
+    global celery_worker_process
+
+    if not app_started_celery_worker:
+        return
+
+    try:
+        logger.info("Stopping Celery Worker...")
+        print("🛑 Stopping Celery Worker...")
+
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/FI", "WINDOWTITLE eq Celery Worker"],
+            capture_output=True
+        )
+
+        logger.info("Celery Worker stopped")
+        print("✅ Celery Worker stopped")
+    except Exception as e:
+        logger.warning(f"Error stopping Celery Worker: {e}")
+
+
+def stop_celery_flower():
+    """
+    Stop Flower Monitor (best effort, only if we started it)
+    """
+    global celery_flower_process
+
+    if not app_started_celery_flower:
+        return
+
+    try:
+        logger.info("Stopping Flower Monitor...")
+        print("🛑 Stopping Flower Monitor...")
+
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/FI", "WINDOWTITLE eq Flower Monitor"],
+            capture_output=True
+        )
+
+        logger.info("Flower Monitor stopped")
+        print("✅ Flower Monitor stopped")
+    except Exception as e:
+        logger.warning(f"Error stopping Flower: {e}")
+
+
+def stop_celery():
+    """
+    Stop both Celery Worker and Flower (best effort, only if we started them)
+    """
+    stop_celery_worker()
+    stop_celery_flower()
+
+
 
 # =============================================================================
 # Qdrant Process Management
@@ -202,24 +385,10 @@ def check_qdrant_health() -> bool:
     Check if Qdrant is already running and accessible
     Returns True if Qdrant is healthy, False otherwise
     """
-    import requests
-
-    try:
-        # Try to connect to Qdrant's health endpoint
-        response = requests.get(
-            f"{settings.QDRANT_URL}/healthz",
-            timeout=2
-        )
-
-        if response.status_code == 200:
-            logger.info("Qdrant is already running and healthy")
-            print("✅ Qdrant is already running")
-            return True
-
-    except requests.exceptions.RequestException:
-        # Qdrant is not accessible
-        pass
-
+    if HealthChecker.check_http(f"{settings.QDRANT_URL}/healthz", timeout=2):
+        logger.info("Qdrant is already running and healthy")
+        print("✅ Qdrant is already running")
+        return True
     return False
 
 
@@ -361,13 +530,22 @@ def ensure_qdrant_running():
     system = platform.system()
 
     if system == "Windows":
-        return start_qdrant_windows()
+        success = start_qdrant_windows()
+        if success:
+            app_started_qdrant = True
+        return success
     elif system == "Linux":
-        return start_qdrant_linux()
+        success = start_qdrant_linux()
+        if success:
+            app_started_qdrant = True
+        return success
     elif system == "Darwin":  # macOS
         # Similar to Linux, could use docker or homebrew
         logger.info("macOS detected, attempting Docker start...")
-        return start_qdrant_linux()  # Reuse Linux logic for now
+        success = start_qdrant_linux()  # Reuse Linux logic for now
+        if success:
+            app_started_qdrant = True
+        return success
     else:
         logger.warning(f"Unsupported OS: {system}")
         print(f"⚠️  Unsupported OS: {system}. Please start Qdrant manually.")
@@ -410,109 +588,22 @@ def stop_qdrant():
         print(f"❌ Error stopping Qdrant: {e}")
 
 
-async def sync_tool_templates():
+async def sync_tool_templates(tools_to_sync: List):
     """
     Synchronize tool templates from Python code to database.
     This ensures that database templates match the current code implementation.
+
+    Uses ToolService through service_factory (no direct database access).
+
+    Args:
+        tools_to_sync: List of tool instances to synchronize
     """
-    from src.database.connection import AsyncSessionLocal
-    from sqlalchemy import select
-    from src.models.models import CustomTool
-    from src.tools.http_tool import HTTPTool
-    from src.tools.sql_tool import SQLTool
-    from src.tools.rag_tool import RAGTool
+    from src.utils.service_factory import get_tool_service
 
     try:
-        async with AsyncSessionLocal() as db:
-            # Get existing templates
-            result = await db.execute(
-                select(CustomTool).filter(CustomTool.is_template == True)
-            )
-            existing_templates = {tool.tool_type: tool for tool in result.scalars().all()}
-
-            # Define tools to sync
-            tools_to_sync = [
-                HTTPTool(),
-                SQLTool(),
-                RAGTool()
-            ]
-
-            updated_count = 0
-            created_count = 0
-
-            for tool in tools_to_sync:
-                tool_type = tool.name.lower()
-                # Build config schema with example values
-                properties = {}
-                example_values = {}
-
-                for param in tool.get_parameters():
-                    properties[param.name] = {
-                        "type": param.type,
-                        "description": param.description,
-                        "required": param.required,
-                        "default": param.default,
-                        "enum": param.enum,
-                        "example": param.example  # Include example value from parameter definition
-                    }
-                    # Use parameter's example value, or default value, or a sensible default
-                    if param.example is not None:
-                        example_values[param.name] = param.example
-                    elif param.default is not None:
-                        example_values[param.name] = param.default
-                    elif param.type == "string":
-                        example_values[param.name] = f"example_{param.name}"
-                    elif param.type == "integer":
-                        example_values[param.name] = 100
-                    elif param.type == "boolean":
-                        example_values[param.name] = True
-                    elif param.type == "object":
-                        example_values[param.name] = {}
-                    elif param.type == "array":
-                        example_values[param.name] = []
-
-                template_data = {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "tool_type": tool_type,  # Use tool name as type
-                    "is_template": True,
-                    "configuration": {},  # Default empty configuration for templates
-                    "config_schema": {
-                        "type": "object",
-                        "properties": properties
-                    },
-                    "example": example_values  # Example values based on parameter definitions
-                }
-
-                if tool_type in existing_templates:
-                    # Update existing template
-                    existing = existing_templates[tool_type]
-                    existing.name = template_data["name"]
-                    existing.description = template_data["description"]
-                    existing.configuration = template_data["configuration"]
-                    existing.config_schema = template_data["config_schema"]
-                    existing.example = template_data["example"]
-                    updated_count += 1
-                else:
-                    # Create new template
-                    new_template = CustomTool(
-                        name=template_data["name"],
-                        description=template_data["description"],
-                        tool_type=tool_type,
-                        is_template=True,
-                        configuration=template_data["configuration"],
-                        config_schema=template_data["config_schema"],
-                        example=template_data["example"],
-                        is_active=True
-                    )
-                    db.add(new_template)
-                    created_count += 1
-
-            await db.commit()
-
-            logger.info(f"✅ Tool templates synchronized: {created_count} created, {updated_count} updated")
+        async with get_tool_service() as tool_service:
+            created_count, updated_count = await tool_service.sync_tool_templates(tools_to_sync)
             print(f"✅ Tool templates synchronized: {created_count} created, {updated_count} updated")
-
     except Exception as e:
         logger.error(f"Template synchronization failed: {e}", exc_info=True)
         print(f"❌ Template synchronization failed: {e}")
@@ -523,54 +614,23 @@ async def initialize_tool_types():
     """
     Initialize tool types from the database at application startup.
     This ensures that custom tool types are loaded and available.
+
+    Uses ToolService through service_factory (no direct database access).
     """
-    from src.database.connection import AsyncSessionLocal
-    from src.api.v1.tools import load_tool_types_from_db
-    from sqlalchemy import select
-    from src.models.models import CustomTool
+    from src.utils.service_factory import get_tool_service
 
     try:
-        async with AsyncSessionLocal() as db:
-            # Load custom tools from database and register them in the tool registry
-            # Exclude template tools (is_template=True) - only register actual custom tools
-            custom_tools = await db.execute(
-                select(CustomTool).filter(
-                    CustomTool.is_active == True,
-                    CustomTool.is_template == False
-                )
+        async with get_tool_service() as tool_service:
+            # Load tool types through service (arquitectura en capas)
+            tool_types = await tool_service.load_tool_types_for_initialization()
+            logger.info(
+                f"Tool types loaded from database: {list(tool_types.keys())}",
+                extra={"tool_types": list(tool_types.keys())}
             )
-            custom_tools = custom_tools.scalars().all()
-
-            if custom_tools:
-                logger.info(f"Loading {len(custom_tools)} custom tools from database...")
-                print(f"🔄 Loading {len(custom_tools)} custom tools from database...")
-
-                for custom_tool in custom_tools:
-                    try:
-                        # Create executor for the custom tool
-                        custom_tool_executor = CustomToolExecutor(custom_tool.id, db)
-
-                        # Override the name to use the tool's actual name instead of ID-based name
-                        custom_tool_executor._name = custom_tool.name
-
-                        # Register in tool registry
-                        tool_registry.register(custom_tool_executor)
-
-                        logger.info(f"Custom tool registered: {custom_tool.name} (ID: {custom_tool.id})")
-                        print(f"✅ Custom tool registered: {custom_tool.name}")
-
-                    except Exception as e:
-                        logger.error(f"Failed to register custom tool {custom_tool.name}: {e}", exc_info=True)
-                        print(f"⚠️  Failed to register custom tool {custom_tool.name}: {e}")
-
-            # Load tool types from database
-            tool_types = await load_tool_types_from_db(db)
-            logger.info(f"Tool types loaded from database: {list(tool_types.keys())}",
-                       extra={"tool_types": list(tool_types.keys())})
-            print(f"✅ Tool types loaded: {len(tool_types)} types")
+            print(f"Tool types loaded: {len(tool_types)} types")
     except Exception as e:
         logger.error(f"Failed to initialize tool types: {e}", exc_info=True)
-        print(f"⚠️  Failed to initialize tool types: {e}")
+        print(f"Failed to initialize tool types: {e}")
 
 
 # =============================================================================
@@ -579,74 +639,127 @@ async def initialize_tool_types():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Lifespan events for startup and shutdown
-    """
-    # Startup
-    logger.info("Starting RAG Chatbot API",
-                extra={"version": settings.APP_VERSION, "environment": settings.ENVIRONMENT})
-    print("🚀 Starting RAG Chatbot API...")
+    """Application lifespan manager - handles startup and shutdown"""
+    logger.info(
+        "Starting Chatbot API",
+        extra={"version": settings.APP_VERSION, "environment": settings.ENVIRONMENT}
+    )
+    print("🚀 Starting Chatbot API...")
 
-    # Ensure Qdrant is running (checks health first, then tries to start if needed)
+    # Start Qdrant
     ensure_qdrant_running()
 
-    # Ensure Redis is running
-    ensure_redis_running()
+    # Start Redis
+    redis_ok = ensure_redis_running()
+
+    # Start Celery (Worker + Flower)
+    if redis_ok:
+        ensure_celery_running()
+    else:
+        logger.warning("Redis unavailable; skipping Celery auto-start")
+        print("⚠️  Redis unavailable; skipping Celery auto-start")
 
     # Initialize database
     init_db()
     logger.info("Database initialized")
 
-    # Sync tool templates from code to database
-    await sync_tool_templates()
+    # Import service factory for tool operations
+    from src.utils.service_factory import get_tool_service, get_session_for_provider_sync
+
+    # Instantiate physical tools (no database needed)
+    rag_tool = RAGTool()
+    http_tool = HTTPTool()
+    sql_tool = SQLTool()
+    codebase_tool = CodebaseTool()
+    obsidian_tool = ObsidianNoteTool()
+
+    # Register physical tool instances (solo una vez)
+    tool_registry.register(rag_tool)
+    tool_registry.register(http_tool)
+    tool_registry.register(sql_tool)
+    tool_registry.register(codebase_tool)
+    tool_registry.register(obsidian_tool)
+
+    logger.info(f"Physical tools registered: {len(tool_registry.list_names())}")
+    print(f"✅ {len(tool_registry.list_names())} physical tools registered")
+
+    # Sync tool templates to database using ToolService
+    await sync_tool_templates(
+        tools_to_sync=[rag_tool, http_tool, sql_tool, codebase_tool, obsidian_tool]
+    )
 
     # Initialize tool types from database
     await initialize_tool_types()
 
-    # Register tools
-    tool_registry.register(RAGTool())
-    tool_registry.register(HTTPTool())
-    tool_registry.register(SQLTool())
-    # tool_registry.register(CodeAnalyzerTool())
-    # tool_registry.register(DocumentProcessorTool())
+    # Load and register ONLY custom tool instances (NOT templates)
+    try:
+        async with get_tool_service() as tool_service:
+            # ✅ IMPORTANTE: Obtener SOLO instancias personalizadas, NO templates
+            # Los templates solo están en BD como referencia, no se registran
+            custom_tools = await tool_service.get_custom_tools_for_startup()
 
-    # Get DB session for tools that need it
-    from src.database.connection import SessionLocal
-    db = SessionLocal()
-    # tool_registry.register(DeepThinkingTool(db))
+            if custom_tools:
+                logger.info(
+                    f"Loading {len(custom_tools)} custom tool instances from database...")
+                print(f"Loading {len(custom_tools)} custom tool instances from database...")
+
+                # Get repositories from service for CustomToolExecutor
+                custom_tool_repo = tool_service.custom_tool_repo
+                file_repo = tool_service.file_repo
+
+                for custom_tool in custom_tools:
+                    try:
+                        from src.tools.custom_tool import CustomToolExecutor
+                        custom_tool_executor = CustomToolExecutor(
+                            custom_tool_id=custom_tool.id,
+                            file_repo=file_repo,
+                            custom_tool_repo=custom_tool_repo
+                        )
+                        custom_tool_executor._name = custom_tool.name
+                        tool_registry.register(custom_tool_executor)
+
+                        logger.info(
+                            f"Custom tool registered: {custom_tool.name} (ID: {custom_tool.id})")
+                        print(f"✓ Custom tool registered: {custom_tool.name}")
+                    except Exception as e:
+                        logger.error(f"Failed to register custom tool {custom_tool.name}: {e}",
+                                     exc_info=True)
+                        print(f"✗ Failed to register custom tool {custom_tool.name}: {e}")
+            else:
+                logger.info("No custom tool instances found (only templates exist)")
+                print("✓ No custom tool instances to load (templates are in DB for reference)")
+
+    except Exception as e:
+        logger.error(f"Failed to load custom tools: {e}", exc_info=True)
+        print(f"Failed to load custom tools: {e}")
 
     # Sync LLM Models
     try:
         from src.providers.manager import provider_manager
-        from src.database.connection import AsyncSessionLocal
-
         logger.info("Syncing LLM models...")
-        print("🔄 Syncing LLM models from providers...")
+        print("Syncing LLM models from providers...")
 
-        async with AsyncSessionLocal() as session:
+        async with get_session_for_provider_sync() as session:
             await provider_manager.sync_available_models(session)
-
     except Exception as e:
         logger.error(f"Failed to sync models on startup: {e}")
-        print(f"⚠️  Failed to sync models: {e}")
-    finally:
-        db.close()  # Close the sync session created earlier if any
+        print(f"Failed to sync models: {e}")
 
-    logger.info(f"Tools registered: {len(tool_registry.list_names())}",
-                extra={"tools": tool_registry.list_names()})
-    print(f"✅ {len(tool_registry.list_names())} tools registered")
-    print(f"✅ API ready on {settings.API_PREFIX}")
+    logger.info(
+        f"Tools registered: {len(tool_registry.list_names())}",
+        extra={"tools": tool_registry.list_names()}
+    )
+    print(f"🎉 {len(tool_registry.list_names())} tools registered")
+    print(f"🚀 API ready on {settings.API_PREFIX}")
 
     yield
 
     # Shutdown
-    logger.info("Shutting down RAG Chatbot API")
-    print("🛑 Shutting down...")
-    close_db_connections()
+    await close_db_connections()
     stop_qdrant()
     stop_redis()
-    logger.info("Shutdown complete")
-    print("✅ Goodbye!")
+    stop_celery()
+    logger.info("Application shutdown complete")
 
 
 # =============================================================================
@@ -695,7 +808,11 @@ async def not_found_handler(request, exc):
     logger.warning(f"Resource not found: {request.url.path}", extra={"path": str(request.url.path)})
     return JSONResponse(
         status_code=404,
-        content={"error": "Resource not found", "detail": str(exc)}
+        content={
+            "error": "Resource not found",
+            "detail": str(exc),
+            "error_code": "RESOURCE_NOT_FOUND"
+        }
     )
 
 
@@ -705,7 +822,11 @@ async def internal_error_handler(request, exc):
                  extra={"path": str(request.url.path)})
     return JSONResponse(
         status_code=500,
-        content={"error": "Internal server error", "detail": str(exc)}
+        content={
+            "error": "Internal server error",
+            "detail": str(exc),
+            "error_code": "INTERNAL_SERVER_ERROR"
+        }
     )
 
 
@@ -786,12 +907,12 @@ app.include_router(
 async def list_providers():
     """List available LLM providers with enhanced model attributes from database"""
     from src.providers.manager import provider_manager
-    from src.database.connection import AsyncSessionLocal
+    from src.utils.service_factory import get_session_for_provider_sync
 
     providers = provider_manager.get_available_providers()
 
-    # Get models from database (includes all llm_models table fields)
-    async with AsyncSessionLocal() as session:
+    # Get models from database using service factory
+    async with get_session_for_provider_sync() as session:
         models_list = await provider_manager.get_available_models(session)
 
         # Group by provider

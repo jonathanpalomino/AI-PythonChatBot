@@ -15,7 +15,7 @@ CREATE TYPE processing_status AS ENUM ('pending', 'processing', 'completed', 'er
 CREATE TYPE visibility_type AS ENUM ('public', 'private', 'shared');
 CREATE TYPE hallucination_mode AS ENUM ('strict', 'balanced', 'creative');
 CREATE TYPE tool_mode AS ENUM ('agent', 'manual');
-CREATE TYPE tooltype AS ENUM ('http_request', 'sql_query', 'rag_search', 'custom');
+CREATE TYPE tooltype AS ENUM ('http_request', 'sql_query', 'rag_search', 'codebase_tool', 'custom');
 
 -- =============================================================================
 -- TABLE: prompt_templates
@@ -168,11 +168,14 @@ CREATE TABLE custom_tools (
     description TEXT,
     tool_type tooltype NOT NULL DEFAULT 'http_request',
     configuration JSONB DEFAULT '{}'::jsonb,
+    content_prompt TEXT,
     visibility visibility_type DEFAULT 'public',
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+COMMENT ON COLUMN custom_tools.content_prompt IS 'Instrucciones personalizadas para el LLM sobre cómo interpretar y presentar los resultados de esta herramienta';
 
 CREATE INDEX idx_custom_tools_active ON custom_tools(is_active) WHERE is_active = true;
 CREATE INDEX idx_custom_tools_visibility ON custom_tools(visibility);

@@ -5,14 +5,12 @@
 """
 Gestor unificado de providers de LLM (Local, OpenAI, Claude, Gemini, OpenRouter)
 """
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from datetime import datetime
-from enum import Enum
-from typing import Dict, List, Optional, Any, AsyncGenerator
 import json
 import subprocess
-import re
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import Enum
+from typing import Dict, List, Optional, Any, AsyncGenerator
 
 import anthropic
 from ollama import Client as OllamaClient
@@ -21,10 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config.settings import settings
 from src.providers.cancellable_stream import CancellableProviderMixin
-from src.utils.logger import get_logger
+from src.utils.date_utils import get_current_utc
+from src.utils.logger import get_logger, get_payload_request_logger, get_payload_response_logger
 
-# Logger para el provider local
+# Loggers
 logger = get_logger(__name__)
+payload_request_logger = get_payload_request_logger()
+payload_response_logger = get_payload_response_logger()
 
 
 class ProviderType(str, Enum):
@@ -121,7 +122,7 @@ class BaseProvider(ABC):
         self,
         messages: List[ChatMessage],
         model: str,
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict]] = None,
         **kwargs
@@ -134,7 +135,7 @@ class BaseProvider(ABC):
         self,
         messages: List[ChatMessage],
         model: str,
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         **kwargs
     ) -> AsyncGenerator[str, None]:
@@ -174,9 +175,9 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
         """Detect number of available GPUs (Linux and Windows compatible)"""
         if self._gpu_count is not None:
             return self._gpu_count
-        
+
         import platform
-        
+
         try:
             # Try nvidia-smi first (Linux/Windows)
             result = subprocess.run(
@@ -239,7 +240,7 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
     def _detect_cpu_threads(self) -> int:
         """Detect number of available CPU threads (Linux and Windows compatible)"""
         import platform
-        
+
         try:
             # Try to get CPU count from /proc/cpuinfo (Linux)
             if platform.system() == 'Linux':
@@ -339,7 +340,8 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
             request_body["stream"] = True
 
         # Log the request body
-        logger.info(f"HTTP Request: POST http://localhost:11434/api/chat - Request body: {json.dumps(request_body, indent=2)}")
+        ollama_url = f"{settings.OLLAMA_BASE_URL}/api/chat"
+        payload_request_logger.info(f"HTTP Request: POST {ollama_url} - Request body: {json.dumps(request_body, indent=2)}")
 
         return request_body
 
@@ -347,7 +349,7 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
         self,
         messages: List[ChatMessage],
         model: str,
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict]] = None,
         **kwargs
@@ -361,27 +363,12 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
             for msg in messages
         ]
 
-        # Calculate dynamic context size based on message history
-        total_chars = sum(len(msg.get("content", "")) for msg in ollama_messages)
-        estimated_tokens = total_chars // 3  # Rough approximation: 3 chars per token
-        # Use between 512 and 4096 tokens, defaulting to 2x estimated need
-        #dynamic_ctx = min(max(512, estimated_tokens * 2), 4096)
-        dynamic_ctx = min(max(512, estimated_tokens * 2), 8192)
+        options = {}
+        if temperature is not None:
+            options["temperature"] = temperature
+        if max_tokens:
+            options["num_predict"] = max_tokens
 
-        #options = {
-        #    "temperature": temperature,
-        #    "num_predict": max_tokens or 2000,
-        #    #"num_ctx": kwargs.get("num_ctx", min(1024, dynamic_ctx)),
-        #    "num_ctx": kwargs.get("num_ctx", dynamic_ctx),
-        #    # Reduced from 2048, with dynamic sizing
-        #    "num_gpu": kwargs.get("num_gpu", self._detect_gpu_count()),  # Auto-detect GPU count
-        #    #"num_thread": kwargs.get("num_thread", self._detect_cpu_threads()),  # Auto-detect CPU #threads
-        #    "num_batch": kwargs.get("num_batch", 512),  # Batch processing
-        #}
-        options = {
-            "temperature": temperature,
-            "num_predict": max_tokens or 2000,
-        }
 
         # Solo incluir parámetros si se proporcionan en kwargs
         if "num_ctx" in kwargs:
@@ -392,7 +379,7 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
             options["num_thread"] = kwargs["num_thread"]
         if "num_batch" in kwargs:
             options["num_batch"] = kwargs["num_batch"]
-        
+
         # Prepare and log request body
         self._prepare_request_body(model, ollama_messages, options, stream=False)
 
@@ -418,12 +405,14 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
             else:
                 # For non-serializable objects, return their string representation
                 return str(obj)
-        
+
         try:
             serializable_response = make_serializable(response)
-            logger.info(f"HTTP Response: POST http://localhost:11434/api/chat - Response: {json.dumps(serializable_response, indent=2)}")
+            ollama_url = f"{settings.OLLAMA_BASE_URL}/api/chat"
+            payload_request_logger.info(f"HTTP Response: POST {ollama_url} - Response: {json.dumps(serializable_response, indent=2)}")
         except Exception as e:
-            logger.info(f"HTTP Response: POST http://localhost:11434/api/chat - Response: <non-serializable response: {str(e)}>")
+            ollama_url = f"{settings.OLLAMA_BASE_URL}/api/chat"
+            payload_request_logger.info(f"HTTP Response: POST {ollama_url} - Response: <non-serializable response: {str(e)}>")
 
         # Extract content - handle Qwen3 "thinking" mode responses
         raw_content = response["message"].get("content", "")
@@ -479,7 +468,7 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
         self,
         messages: List[ChatMessage],
         model: str,
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         **kwargs
     ) -> AsyncGenerator[str, None]:
@@ -491,25 +480,12 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
             for msg in messages
         ]
 
-        # Calculate dynamic context size based on message history
-        total_chars = sum(len(msg.get("content", "")) for msg in ollama_messages)
-        estimated_tokens = total_chars // 3  # Rough approximation: 3 chars per token
-        # Use between 512 and 4096 tokens, defaulting to 2x estimated need
-        #dynamic_ctx = min(max(512, estimated_tokens * 2), 4096)
-        dynamic_ctx = min(max(512, estimated_tokens * 2), 8192)
+        options = {}
+        if temperature is not None:
+            options["temperature"] = temperature
+        if max_tokens:
+            options["num_predict"] = max_tokens
 
-        #options = {
-        #    "temperature": temperature,
-        #    "num_predict": max_tokens or 2000,
-        #    "num_ctx": kwargs.get("num_ctx", dynamic_ctx),
-        #    "num_gpu": kwargs.get("num_gpu", self._detect_gpu_count()),  # Auto-detect GPU count
-        #    "num_thread": kwargs.get("num_thread", self._detect_cpu_threads()),  # Auto-detect CPU #threads
-        #    "num_batch": kwargs.get("num_batch", 512),  # Batch processing
-        #}
-        options = {
-            "temperature": temperature,
-            "num_predict": max_tokens or 2000,
-        }
 
         # Solo incluir parámetros si se proporcionan en kwargs
         if "num_ctx" in kwargs:
@@ -534,7 +510,8 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
         )
 
         # Log the stream initialization (note: we can't log the full response for streaming)
-        logger.info(f"HTTP Stream Initialized: POST http://localhost:11434/api/chat - Model: {model}, Messages: {len(ollama_messages)}")
+        ollama_url = f"{settings.OLLAMA_BASE_URL}/api/chat"
+        logger.info(f"HTTP Stream Initialized: POST {ollama_url} - Model: {model}, Messages: {len(ollama_messages)}")
 
         # For streaming, we need to handle Qwen3 thinking tags
         # NEW: Emit thinking content to frontend, THEN filter for final response
@@ -544,25 +521,47 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
 
         # NEW: Handle both thinking and response fields for DeepSeek models
         for chunk in stream:
-            # Log the entire chunk for debugging
-            # Convert chunk to dict for JSON serialization
+            # DEBUG: Log raw chunk structure to understand the format
+            chunk_type = type(chunk).__name__
+            chunk_dir = [attr for attr in dir(chunk) if not attr.startswith('_')]
+            logger.debug(f"Raw chunk type: {chunk_type}, attributes: {chunk_dir}")
+
+            # Extract content from chunk - handle both dict and object formats
+            # Ollama Python client returns objects with .message.content attribute
+            if isinstance(chunk, dict):
+                message_obj = chunk.get("message", {})
+                if isinstance(message_obj, dict):
+                    response_content = message_obj.get("content", "")
+                    thinking_content = message_obj.get("thinking", "")
+                else:
+                    response_content = getattr(message_obj, 'content', '')
+                    thinking_content = getattr(message_obj, 'thinking', '')
+            else:
+                # Ollama Python client returns objects
+                message_obj = getattr(chunk, 'message', None)
+                if message_obj:
+                    response_content = getattr(message_obj, 'content', '')
+                    thinking_content = getattr(message_obj, 'thinking', '')
+                else:
+                    # Fallback: some versions return content directly
+                    response_content = getattr(chunk, 'content', '')
+                    thinking_content = getattr(chunk, 'thinking', '')
+
+            # Skip empty chunks (Ollama heartbeats)
+            if not response_content and not thinking_content:
+                continue
+
+            # Log the chunk only if it has content
             try:
-                chunk_dict = chunk if isinstance(chunk, dict) else {
+                chunk_dict = {
                     "message": {
-                        "content": getattr(chunk, 'content', ''),
-                        "thinking": getattr(chunk, 'thinking', '')
+                        "content": response_content,
+                        "thinking": thinking_content
                     }
                 }
-                logger.info(f"Full chunk: {json.dumps(chunk_dict, indent=2)}")
+                payload_response_logger.info(f"Full chunk: {json.dumps(chunk_dict, indent=2)}")
             except Exception as e:
-                logger.info(f"Full chunk (non-serializable): {str(chunk)[:200]}...")
-
-            # Extract message object from chunk
-            message_obj = chunk.get("message", {})
-
-            # Handle both response and thinking fields (DeepSeek format)
-            response_content = message_obj.get("content", "")
-            thinking_content = message_obj.get("thinking", "")
+                payload_response_logger.info(f"Full chunk (error): {str(e)}")
 
             # Log for debugging
             #logger.info(f"Chunk content - response: '{response_content}', thinking: '{thinking_content}'")
@@ -584,13 +583,7 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
 
             # Emit response content if present
             if response_content:
-                #logger.info(f"Emitting response content: '{response_content}'")
                 yield json.dumps({"type": "content", "chunk": response_content})
-
-            # Skip chunks with no content
-            if not response_content and not thinking_content:
-                #logger.info("Skipping empty chunk")
-                continue
 
         # Flush remaining buffer if not in think block
         if buffer and not in_think_block:
@@ -681,7 +674,7 @@ class OpenAIProvider(BaseProvider, CancellableProviderMixin):
         self,
         messages: List[ChatMessage],
         model: str,
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict]] = None,
         **kwargs
@@ -703,7 +696,23 @@ class OpenAIProvider(BaseProvider, CancellableProviderMixin):
             request_params["tools"] = tools
             request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
 
+        # Log request
+        payload_request_logger.info(f"OpenAI Request: {json.dumps(request_params, indent=2, default=str)}")
+
         response = await self.client.chat.completions.create(**request_params)
+
+        # Log response
+        try:
+            # Simple serializable dict of response
+            res_dict = {
+                "id": response.id,
+                "model": response.model,
+                "usage": response.usage.model_dump() if response.usage else {},
+                "choices": [{"message": c.message.model_dump(), "finish_reason": c.finish_reason} for c in response.choices]
+            }
+            payload_response_logger.info(f"OpenAI Response: {json.dumps(res_dict, indent=2, default=str)}")
+        except Exception as e:
+            payload_response_logger.info(f"OpenAI Response (non-serializable): {str(response)[:200]}...")
 
         message = response.choices[0].message
 
@@ -736,7 +745,7 @@ class OpenAIProvider(BaseProvider, CancellableProviderMixin):
         self,
         messages: List[ChatMessage],
         model: str,
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         **kwargs
     ) -> AsyncGenerator[str, None]:
@@ -746,13 +755,18 @@ class OpenAIProvider(BaseProvider, CancellableProviderMixin):
             for msg in messages
         ]
 
-        stream = await self.client.chat.completions.create(
-            model=model,
-            messages=openai_messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stream=True
-        )
+        request_params = {
+            "model": model,
+            "messages": openai_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True
+        }
+
+        # Log request
+        payload_request_logger.info(f"OpenAI Stream Request: {json.dumps(request_params, indent=2, default=str)}")
+
+        stream = await self.client.chat.completions.create(**request_params)
 
         async for chunk in stream:
             if chunk.choices[0].delta.content:
@@ -827,7 +841,7 @@ class AnthropicProvider(BaseProvider, CancellableProviderMixin):
         self,
         messages: List[ChatMessage],
         model: str,
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict]] = None,
         **kwargs
@@ -862,7 +876,22 @@ class AnthropicProvider(BaseProvider, CancellableProviderMixin):
         if tools:
             request_params["tools"] = tools
 
+        # Log request
+        payload_request_logger.info(f"Anthropic Request: {json.dumps(request_params, indent=2, default=str)}")
+
         response = await self.client.messages.create(**request_params)
+
+        # Log response
+        try:
+            res_dict = {
+                "id": response.id,
+                "model": response.model,
+                "usage": response.usage.model_dump() if response.usage else {},
+                "content": [{"type": b.type, "text": getattr(b, 'text', ''), "input": getattr(b, 'input', {})} for b in response.content]
+            }
+            payload_response_logger.info(f"Anthropic Response: {json.dumps(res_dict, indent=2, default=str)}")
+        except Exception as e:
+            payload_response_logger.info(f"Anthropic Response (non-serializable): {str(response)[:200]}...")
 
         # Extract content and tool calls
         content = ""
@@ -895,7 +924,7 @@ class AnthropicProvider(BaseProvider, CancellableProviderMixin):
         self,
         messages: List[ChatMessage],
         model: str,
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         **kwargs
     ) -> AsyncGenerator[str, None]:
@@ -922,6 +951,9 @@ class AnthropicProvider(BaseProvider, CancellableProviderMixin):
 
         if system_message:
             request_params["system"] = system_message
+
+        # Log request
+        payload_request_logger.info(f"Anthropic Stream Request: {json.dumps(request_params, indent=2, default=str)}")
 
         async with self.client.messages.stream(**request_params) as stream:
             async for text in stream.text_stream:
@@ -985,7 +1017,7 @@ class OpenRouterProvider(BaseProvider, CancellableProviderMixin):
         self,
         messages: List[ChatMessage],
         model: str,
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict]] = None,
         **kwargs
@@ -1011,7 +1043,22 @@ class OpenRouterProvider(BaseProvider, CancellableProviderMixin):
             request_params["tools"] = tools
             request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
 
+        # Log request
+        payload_request_logger.info(f"OpenRouter Request: {json.dumps(request_params, indent=2, default=str)}")
+
         response = await self.client.chat.completions.create(**request_params)
+
+        # Log response
+        try:
+            res_dict = {
+                "id": response.id,
+                "model": response.model,
+                "usage": response.usage.model_dump() if response.usage else {},
+                "choices": [{"message": c.message.model_dump(), "finish_reason": c.finish_reason} for c in response.choices]
+            }
+            payload_response_logger.info(f"OpenRouter Response: {json.dumps(res_dict, indent=2, default=str)}")
+        except Exception as e:
+            payload_response_logger.info(f"OpenRouter Response (non-serializable): {str(response)[:200]}...")
 
         message = response.choices[0].message
 
@@ -1044,7 +1091,7 @@ class OpenRouterProvider(BaseProvider, CancellableProviderMixin):
         self,
         messages: List[ChatMessage],
         model: str,
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         **kwargs
     ) -> AsyncGenerator[str, None]:
@@ -1054,17 +1101,22 @@ class OpenRouterProvider(BaseProvider, CancellableProviderMixin):
             for msg in messages
         ]
 
-        stream = await self.client.chat.completions.create(
-            model=model,
-            messages=openrouter_messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stream=True,
-            extra_headers={
+        request_params = {
+            "model": model,
+            "messages": openrouter_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+            "extra_headers": {
                 "HTTP-Referer": "https://github.com/your-repo",
                 "X-Title": settings.APP_NAME,
             }
-        )
+        }
+
+        # Log request
+        payload_request_logger.info(f"OpenRouter Stream Request: {json.dumps(request_params, indent=2, default=str)}")
+
+        stream = await self.client.chat.completions.create(**request_params)
 
         async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta.content:
@@ -1075,13 +1127,13 @@ class OpenRouterProvider(BaseProvider, CancellableProviderMixin):
         # Note: OpenRouter has MANY models. We should probably fetch them dynamically
         # or cache them. For now, we'll implement a dynamic fetch if possible,
         # otherwise return a curated list of top models.
-        
+
         # Ideally, we should fetch from https://openrouter.ai/api/v1/models
         # But this is a sync method, so we'll use requests or valid hardcoded popular ones
-        
+
         # Since this method is synchronous in the interface, we'll try to fetch using requests
         # or fallback to a popular list.
-        
+
         try:
             import requests
             response = requests.get("https://openrouter.ai/api/v1/models")
@@ -1092,17 +1144,17 @@ class OpenRouterProvider(BaseProvider, CancellableProviderMixin):
                     # Basic filtering for too many models?
                     # For now, include all or popular ones.
                     # OpenRouter returns A LOT of models.
-                    
+
                     # Logic to determine capabilities
                     model_id = m.get("id")
                     name = m.get("name", model_id)
                     context = m.get("context_length", 8192)
-                    
+
                     # Cost (per 1M tokens usually, convert to 1K)
                     pricing_obj = m.get("pricing", {})
                     prompt_price_str = pricing_obj.get("prompt", "0")
                     completion_price_str = pricing_obj.get("completion", "0")
-                    
+
                     try:
                         prompt_price = float(prompt_price_str) * 1000
                         completion_price = float(completion_price_str) * 1000
@@ -1112,12 +1164,12 @@ class OpenRouterProvider(BaseProvider, CancellableProviderMixin):
 
                     # Determine if free
                     is_free = (prompt_price == 0.0 and completion_price == 0.0)
-                    
+
                     # Infer type
                     model_type = ModelType.CHAT
                     if "vision" in model_id.lower():
                         model_type = ModelType.VISION
-                    
+
                     models.append(ModelInfo(
                         name=model_id, # Use ID as the value to send
                         provider=ProviderType.OPENROUTER,
@@ -1206,7 +1258,7 @@ class GroqProvider(BaseProvider, CancellableProviderMixin):
         self,
         messages: List[ChatMessage],
         model: str,
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict]] = None,
         **kwargs
@@ -1228,7 +1280,22 @@ class GroqProvider(BaseProvider, CancellableProviderMixin):
             request_params["tools"] = tools
             request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
 
+        # Log request
+        payload_request_logger.info(f"Groq Request: {json.dumps(request_params, indent=2, default=str)}")
+
         response = await self.client.chat.completions.create(**request_params)
+
+        # Log response
+        try:
+            res_dict = {
+                "id": response.id,
+                "model": response.model,
+                "usage": response.usage.model_dump() if response.usage else {},
+                "choices": [{"message": c.message.model_dump(), "finish_reason": c.finish_reason} for c in response.choices]
+            }
+            payload_response_logger.info(f"Groq Response: {json.dumps(res_dict, indent=2, default=str)}")
+        except Exception as e:
+            payload_response_logger.info(f"Groq Response (non-serializable): {str(response)[:200]}...")
 
         message = response.choices[0].message
 
@@ -1261,7 +1328,7 @@ class GroqProvider(BaseProvider, CancellableProviderMixin):
         self,
         messages: List[ChatMessage],
         model: str,
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         **kwargs
     ) -> AsyncGenerator[str, None]:
@@ -1271,13 +1338,18 @@ class GroqProvider(BaseProvider, CancellableProviderMixin):
             for msg in messages
         ]
 
-        stream = await self.client.chat.completions.create(
-            model=model,
-            messages=groq_messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stream=True
-        )
+        request_params = {
+            "model": model,
+            "messages": groq_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True
+        }
+
+        # Log request
+        payload_request_logger.info(f"Groq Stream Request: {json.dumps(request_params, indent=2, default=str)}")
+
+        stream = await self.client.chat.completions.create(**request_params)
 
         async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta.content:
@@ -1288,7 +1360,7 @@ class GroqProvider(BaseProvider, CancellableProviderMixin):
         # Groq doesn't check credentials on list models by default in all lib versions,
         # but better to provide a static list or fetch if possible.
         # Groq supports: Llama 3 8b/70b, Mixtral 8x7b, Gemma 7b
-        
+
         return [
             ModelInfo(
                 name="llama3-70b-8192",
@@ -1551,7 +1623,7 @@ class ProviderManager:
 
             if existing_model:
                 # Update last_seen
-                existing_model.last_seen = datetime.utcnow()
+                existing_model.last_seen = get_current_utc()
                 # Only update capabilities if NOT custom (user manual override protection)
                 if not existing_model.is_custom:
                     # Update context window if it changed
@@ -1560,7 +1632,7 @@ class ProviderManager:
                     # unless we are upgrading from generic CHAT to more specific REASONING
                     if existing_model.model_type == ModelType.CHAT.value and inferred_type == ModelType.REASONING:
                         existing_model.model_type = inferred_type.value
-                    
+
                     # Update pricing info
                     if hasattr(existing_model, 'is_free'):
                          existing_model.is_free = model_info.is_free

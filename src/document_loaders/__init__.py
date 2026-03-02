@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Optional
 
 from .code_loader import CodeLoader
+from .python_loader import PythonLoader
+from .java_loader import JavaLoader
 from .sql_plsql_loader import SqlPlsqlLoader
 from .base_loader import BaseDocumentLoader
 from .csv_loader import CSVLoader
@@ -26,6 +28,8 @@ class DocumentLoaderFactory:
 
     _loaders = [
         MarkdownLoader(),
+        PythonLoader(),  # Specialized Python Loader
+        JavaLoader(),    # Specialized Java Loader
         WordLoaderUniversal(),
         TextLoader(),
         PDFLoader(),
@@ -35,7 +39,7 @@ class DocumentLoaderFactory:
         HTMLLoader(),
         ExcelLoader(),
         SqlPlsqlLoader(),
-        CodeLoader(),  # Descomentar si se desea incluir el CodeLoader
+        CodeLoader(),  # Generic Code Loader (Other languages)
         # Agregar mÃ¡s loaders aquÃ­ segÃºn se implementen
     ]
 
@@ -54,6 +58,16 @@ class DocumentLoaderFactory:
         for loader in cls._loaders:
             extensions.update(loader.supported_extensions)
         return extensions
+
+    @classmethod
+    def get_code_extensions(cls) -> set:
+        """Retorna extensiones que son consideradas código fuente"""
+        code_extensions = set()
+        for loader in cls._loaders:
+            # Consideramos CodeLoader y SqlPlsqlLoader como código
+            if isinstance(loader, (CodeLoader, SqlPlsqlLoader)):
+                code_extensions.update(loader.supported_extensions)
+        return code_extensions
 
     @classmethod
     def get_loader_info(cls) -> dict:

@@ -6,9 +6,10 @@ Sistema de tracking para sincronizaciÃ³n incremental
 """
 import hashlib
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+from src.utils.date_utils import get_current_utc_iso
 
 
 class SyncTracker:
@@ -62,7 +63,7 @@ class SyncTracker:
         """Actualiza informaciÃ³n de un archivo"""
         self.metadata[file_path] = {
             'hash': self.compute_hash(content),
-            'lastModified': datetime.now().isoformat(),
+            'lastModified': get_current_utc_iso(),
             'pointIds': point_ids,
             'sections': len(point_ids)
         }

@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.models.models import Base
+from src.utils.date_utils import get_current_utc
 
 
 class LLMModel(Base):
@@ -43,16 +44,21 @@ class LLMModel(Base):
     cpu_supported: Mapped[bool] = mapped_column(Boolean, default=True)  # Can run on CPU
     gpu_required: Mapped[bool] = mapped_column(Boolean, default=False)  # Requires GPU
     parent_retrieval_supported: Mapped[bool] = mapped_column(Boolean, default=True)  # Supports parent document retrieval
-    
+
     # Pricing info
     is_free: Mapped[bool] = mapped_column(Boolean, default=False)
     cost_per_1k_input: Mapped[float] = mapped_column(Float, default=0.0)
     cost_per_1k_output: Mapped[float] = mapped_column(Float, default=0.0)
-    
-    last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
-                                                 onupdate=datetime.utcnow)
+
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=get_current_utc)
+
+    # Timestamps (Explicitly defined for visibility, but using centralized logic)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=get_current_utc)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=get_current_utc,
+        onupdate=get_current_utc
+    )
 
     def __repr__(self):
         return f"<LLMModel(name={self.model_name}, type={self.model_type})>"

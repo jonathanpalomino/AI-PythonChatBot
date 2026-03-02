@@ -35,20 +35,16 @@ class JSONLoader(BaseDocumentLoader):
         # Extract sections
         sections = self.extract_sections(data, is_jsonl)
 
-        # Generate full content
+        # Generate full content (implementación especializada)
         full_content = self._generate_full_content(sections)
 
-        # Convertir a ruta relativa
-        abs_path = file_path if file_path.is_absolute() else file_path.resolve()
-        try:
-            relative_path = abs_path.relative_to(Path.cwd())
-        except ValueError:
-            relative_path = abs_path
+        # Usar método compartido para obtener ruta relativa
+        relative_path = self.get_relative_path(file_path)
 
         return ProcessedDocument(
             file_path=str(relative_path),
             file_name=file_path.name,
-                original_filename=original_filename or file_path.name,
+            original_filename=original_filename or file_path.name,
             content=full_content,
             sections=sections,
             metadata=metadata

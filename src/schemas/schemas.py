@@ -192,13 +192,15 @@ class ConversationSettings(BaseModel):
     """Conversation settings"""
     provider: str = "local"
     model: str = "mistral"
-    temperature: float = Field(0.7, ge=0.0, le=2.0)
-    max_tokens: Optional[int] = Field(2000, ge=1)
+    temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
+    max_tokens: Optional[int] = Field(None, ge=1)
     top_p: Optional[float] = Field(0.9, ge=0.0, le=1.0)
     stream_chat: bool = False
 
     # Conversation history
-    max_history_messages: int = Field(5, ge=1, le=50,
+    # Default 30 messages (~9000 tokens avg), max 100 for large context models
+    # For production: adjust based on model context window (see orchestrator.py)
+    max_history_messages: int = Field(30, ge=1, le=100,
                                       description="Maximum number of conversation history messages to include in LLM context")
 
     # Tool configuration
@@ -462,10 +464,16 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[UUID] = None
     file_ids: List[UUID] = Field(default_factory=list)
     stream: bool = False
+    
+    # RAG Context Selection
+    collection_name: Optional[str] = None
 
     # Optional overrides for this specific message
     temperature_override: Optional[float] = None
     max_tokens_override: Optional[int] = None
+    
+    # Additional metadata (e.g. collection_name for RAG)
+    extra_metadata: Optional[Dict[str, Any]] = None
 
 
 class ChatResponse(BaseModel):

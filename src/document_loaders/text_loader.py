@@ -19,40 +19,26 @@ class TextLoader(BaseDocumentLoader):
 
     def load(self, file_path: Path, original_filename: str = None) -> ProcessedDocument:
         """Carga un archivo de texto plano"""
-        # Try multiple encodings
-        content = None
-        encoding_used = 'utf-8'
-
-        for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
-            try:
-                with open(file_path, 'r', encoding=encoding) as f:
-                    content = f.read()
-                encoding_used = encoding
-                break
-            except UnicodeDecodeError:
-                continue
-
-        if content is None:
-            raise ValueError(f"No se pudo decodificar el archivo {file_path}")
+        # Usar método compartido para leer con múltiples codificaciones
+        content, encoding_used = self.read_file_with_encodings(
+            file_path, 
+            encodings=['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+        )
 
         # Extract basic metadata
         metadata = self._extract_metadata(content, encoding_used)
         sections = self.extract_sections(content)
 
-        # Generate full content from sections
+        # Generate full content from sections (usar método de clase base)
         full_content = self._generate_full_content(sections)
 
-        # Convertir a ruta relativa
-        abs_path = file_path if file_path.is_absolute() else file_path.resolve()
-        try:
-            relative_path = abs_path.relative_to(Path.cwd())
-        except ValueError:
-            relative_path = abs_path
+        # Usar método compartido para obtener ruta relativa
+        relative_path = self.get_relative_path(file_path)
 
         return ProcessedDocument(
             file_path=str(relative_path),
             file_name=file_path.name,
-                original_filename=original_filename or file_path.name,
+            original_filename=original_filename or file_path.name,
             content=full_content,
             sections=sections,
             metadata=metadata
@@ -116,14 +102,3 @@ class TextLoader(BaseDocumentLoader):
             ))
 
         return sections
-
-    def _generate_full_content(self, sections: List[DocumentSection]) -> str:
-        """Genera el contenido completo del documento desde las secciones"""
-        full_content = []
-
-        for section in sections:
-            full_content.append(f"# {section.title}")
-            full_content.append(section.content)
-            full_content.append("")  # Línea en blanco entre secciones
-
-        return '\n'.join(full_content).strip()

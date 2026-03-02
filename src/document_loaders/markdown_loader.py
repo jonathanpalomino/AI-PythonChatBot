@@ -22,29 +22,26 @@ class MarkdownLoader(BaseDocumentLoader):
 
     def load(self, file_path: Path, original_filename: str = None) -> ProcessedDocument:
         """Carga un archivo Markdown"""
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+        # Usar método compartido para leer con múltiples codificaciones
+        content, encoding_used = self.read_file_with_encodings(file_path)
 
         # Extraer metadata PRIMERO
         metadata = self._extract_metadata(content)
+        metadata['encoding'] = encoding_used
 
         # Extraer secciones (pasando metadata para enriquecerlas)
         sections = self.extract_sections(content, metadata)
 
-        # Generar contenido completo desde las secciones
+        # Generar contenido completo desde las secciones (implementación especializada con frontmatter)
         full_content = self._generate_full_content(sections, metadata)
 
-        # Convertir a ruta relativa
-        abs_path = file_path if file_path.is_absolute() else file_path.resolve()
-        try:
-            relative_path = abs_path.relative_to(Path.cwd())
-        except ValueError:
-            relative_path = abs_path
+        # Usar método compartido para obtener ruta relativa
+        relative_path = self.get_relative_path(file_path)
 
         return ProcessedDocument(
             file_path=str(relative_path),
             file_name=file_path.name,
-                original_filename=original_filename or file_path.name,
+            original_filename=original_filename or file_path.name,
             content=full_content,
             sections=sections,
             metadata=metadata
@@ -351,54 +348,3 @@ class MarkdownLoader(BaseDocumentLoader):
 
         return '\n'.join(full_content).strip()
 
-    # src/document_loaders/markdown_loader.py
-    # AGREGAR estos métodos a la clase MarkdownLoader existente
-
-    def load_with_obsidian_context(
-        self,
-        file_path: Path,
-        graph: Dict,
-        original_filename: str = None
-    ) -> ProcessedDocument:
-        """
-        Carga un archivo Markdown con contexto de grafo Obsidian
-
-        Args:
-            file_path: Ruta al archivo
-            graph: Grafo de Obsidian (resultado de ObsidianGraphBuilder)
-            original_filename: Nombre original del archivo
-
-        Returns:
-            ProcessedDocument enriquecido con metadata de Obsidian
-        """
-        # Cargar documento normalmente
-        doc = self.load(file_path, original_filename)
-
-        # Enriquecer con metadata de grafo
-        note_name = file_path.stem
-
-        if note_name in graph:
-            graph_metadata = graph[note_name]["metadata"]
-
-            # Agregar metadata de Obsidian
-            doc.metadata.update({
-                "obsidian_outgoing_links": graph_metadata["outgoing"],
-                "obsidian_incoming_links": graph_metadata["incoming"],
-                "obsidian_link_count": graph_metadata["link_count"],
-                "obsidian_is_hub": graph_metadata["is_hub"],
-                "obsidian_is_index": graph_metadata["is_index"],
-                "obsidian_note_type": graph_metadata["note_type"],
-                "obsidian_tags": graph_metadata["tags"],
-                "obsidian_embeds": graph_metadata["embeds"]
-            })
-
-            self.logger.info(
-                f"Enriched document with Obsidian metadata",
-                extra={
-                    "note": note_name,
-                    "note_type": graph_metadata["note_type"],
-                    "links": graph_metadata["link_count"]
-                }
-            )
-
-        return doc

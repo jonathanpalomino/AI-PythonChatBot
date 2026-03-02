@@ -104,12 +104,6 @@ class Settings(BaseSettings):
     # Groq
     GROQ_API_KEY: Optional[str] = Field(None, description="Groq API key")
 
-
-    # Obsidian Configuration
-    ENABLE_OBSIDIAN_GRAPH: bool = True  # Enable graph-aware processing
-    OBSIDIAN_MAX_EXPANSION_LINKS: int = 3  # Max links to follow when expanding
-    OBSIDIAN_CACHE_TTL: int = 3600  # Cache TTL for vault graphs (1 hour)
-    
     # =============================================================================
     # File Storage
     # =============================================================================
@@ -195,7 +189,7 @@ class Settings(BaseSettings):
         True,
         description="Automatically process uploaded files and index to Qdrant"
     )
-    DEFAULT_CHUNK_SIZE: int = Field(1000, description="Default text chunk size")
+    DEFAULT_CHUNK_SIZE: int = Field(8000, description="Default text chunk size - Increased to 8000 for better code context")
     DEFAULT_CHUNK_OVERLAP: int = Field(200, description="Chunk overlap")
     DEFAULT_CHUNK_STRATEGY: str = Field("fixed", description="Default chunking strategy: fixed, sentence, paragraph, semantic")
 
@@ -224,6 +218,38 @@ class Settings(BaseSettings):
                                         description="Default alpha for hybrid search (0.0=lexical, 1.0=semantic)")
 
     # =============================================================================
+    # RAG Tool Professional Settings
+    # =============================================================================
+    EMBEDDING_CACHE_CAPACITY: int = Field(
+        1000,
+        description="Maximum number of embeddings to cache"
+    )
+    EMBEDDING_CACHE_TTL: int = Field(
+        3600,
+        description="Time-to-live for embedding cache entries in seconds"
+    )
+    MAX_SCROLL_ITERATIONS: int = Field(
+        50,
+        description="Maximum iterations for scroll operations (50 * 100 = 5000 chunks max)"
+    )
+    SCROLL_TIMEOUT: float = Field(
+        10.0,
+        description="Timeout for scroll operations in seconds"
+    )
+    RAG_MAX_RETRIES: int = Field(
+        3,
+        description="Maximum number of retry attempts for failed operations"
+    )
+    RAG_RETRY_DELAY: float = Field(
+        1.0,
+        description="Base delay for retry operations in seconds"
+    )
+    RAG_METRICS_MAX_SIZE: int = Field(
+        1000,
+        description="Maximum number of metrics to keep in memory"
+    )
+
+    # =============================================================================
     # Parent Document Retrieval Settings
     # =============================================================================
     PARENT_RETRIEVAL_ENABLED: bool = Field(False,
@@ -232,6 +258,30 @@ class Settings(BaseSettings):
                                        description="Retrieval mode: full_parent or windowed")
     PARENT_WINDOW_SIZE: int = Field(1,
                                     description="Number of adjacent chunks to include in windowed mode")
+
+    # =============================================================================
+    # Intent Classification Settings
+    # =============================================================================
+    INTENT_EMBEDDING_MODEL: str = Field(
+        "paraphrase-MiniLM-L3-v2",
+        description="SentenceTransformer model for intent classification embeddings"
+    )
+    INTENT_MODELS_CACHE_DIR: Path = Field(
+        Path("./models_cache/transformers"),
+        description="Local cache directory for SentenceTransformer models"
+    )
+    INTENT_SIMILARITY_THRESHOLD: float = Field(
+        0.60,
+        description="Minimum similarity threshold for embedding-based intent classification"
+    )
+    INTENT_CACHE_SIZE: int = Field(
+        1000,
+        description="Maximum number of intent classifications to cache"
+    )
+    INTENT_CACHE_TTL: int = Field(
+        3600,
+        description="Time-to-live for intent cache entries in seconds"
+    )
 
     # =============================================================================
     # Model Config
@@ -247,7 +297,7 @@ class Settings(BaseSettings):
     # Validators
     # =============================================================================
 
-    @field_validator("UPLOAD_DIR", "TRACKING_FILE", "BM25_INDEX_DIR")
+    @field_validator("UPLOAD_DIR", "TRACKING_FILE", "BM25_INDEX_DIR", "INTENT_MODELS_CACHE_DIR")
     @classmethod
     def create_directories(cls, v: Path) -> Path:
         """Create directories if they don't exist"""

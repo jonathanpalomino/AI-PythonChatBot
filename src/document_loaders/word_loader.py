@@ -20,26 +20,22 @@ Features:
 Autor: Sistema RAG Chatbot
 Versión: 2.5
 """
-from pathlib import Path
-from typing import List, Dict, Optional, Any, Union, Tuple, Set
-from datetime import datetime
-import hashlib
-import re
 import base64
-import io
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
 import json
-from dataclasses import dataclass, field
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import List, Dict, Optional, Any, Tuple
 
-import docx
 from docx import Document
+from docx.oxml.ns import qn
 from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
-from docx.oxml.ns import qn
 from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
-from docx.shared import Pt, RGBColor
 
+from src.utils.date_utils import get_current_utc_iso
 from src.utils.logger import get_logger
 from .base_loader import BaseDocumentLoader, DocumentSection, ProcessedDocument
 
@@ -173,28 +169,28 @@ class TextCleaner:
 
 class ChartExtractorMixin:
     """Mixin para extracción de gráficos embebidos"""
-    
+
     def _extract_charts(self, doc: Document) -> List[Dict[str, Any]]:
         """
         Extrae todos los gráficos embebidos del documento.
-        
+
         Los gráficos de Word pueden ser:
         - Charts de Excel embebidos
         - Gráficos creados en Word
-        
+
         Returns:
             List de dicts con información de gráficos
         """
         charts = []
         chart_index = 0
-        
+
         try:
             # Buscar gráficos en relationships
             for rel in doc.part.rels.values():
                 if "chart" in rel.target_ref.lower():
                     try:
                         chart_part = rel.target_part
-                        
+
                         # Extraer datos del gráfico
                         chart_info = {
                             'type': 'chart',
@@ -203,7 +199,7 @@ class ChartExtractorMixin:
                             'target': rel.target_ref,
                             'content_type': chart_part.content_type if hasattr(chart_part, 'content_type') else 'unknown',
                         }
-                        
+
                         # Intentar extraer XML del gráfico para obtener datos
                         try:
                             chart_xml = chart_part.blob.decode('utf-8')
@@ -211,40 +207,40 @@ class ChartExtractorMixin:
                             chart_info['xml_preview'] = chart_xml[:200] + '...'
                         except:
                             chart_info['has_data'] = False
-                        
+
                         charts.append(chart_info)
                         chart_index += 1
-                        
+
                         if hasattr(self, 'stats'):
                             self.stats['charts'] = self.stats.get('charts', 0) + 1
-                        
+
                     except Exception as e:
                         logger.debug(f"Error extracting chart {rel.rId}: {e}")
-                        
+
         except Exception as e:
             logger.debug(f"Error in chart extraction: {e}")
-        
+
         return charts
-    
+
     def _extract_chart_from_paragraph(self, para: Paragraph) -> Optional[Dict[str, Any]]:
         """
         Extrae gráfico específico de un párrafo.
-        
+
         Returns:
             Dict con info del gráfico o None
         """
         try:
             # Buscar elementos de gráfico en el XML del párrafo
             chart_elements = para._element.xpath('.//c:chart')
-            
+
             if chart_elements:
                 chart_elem = chart_elements[0]
                 rId = chart_elem.get(qn('r:id'))
-                
+
                 if rId:
                     try:
                         chart_part = para.part.rels[rId].target_part
-                        
+
                         return {
                             'type': 'chart',
                             'rel_id': rId,
@@ -253,44 +249,44 @@ class ChartExtractorMixin:
                         }
                     except:
                         pass
-                        
+
         except Exception as e:
             logger.debug(f"Error extracting chart from paragraph: {e}")
-        
+
         return None
 
 
 class CommentExtractorMixin:
     """Mixin para extracción de comentarios y notas al margen"""
-    
+
     def _extract_all_comments(self, doc: Document) -> List[Dict[str, Any]]:
         """
         Extrae todos los comentarios del documento.
-        
+
         Returns:
             List de dicts con información de comentarios
         """
         comments = []
-        
+
         try:
             # Buscar parte de comentarios
             for rel in doc.part.rels.values():
                 if "comments" in rel.target_ref.lower():
                     try:
                         comments_part = rel.target_part
-                        
+
                         # Parsear XML de comentarios
                         comments_xml = comments_part.element
-                        
+
                         for comment in comments_xml.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}comment'):
                             comment_id = comment.get(qn('w:id'))
                             author = comment.get(qn('w:author'), 'Unknown')
                             date = comment.get(qn('w:date'), '')
-                            
+
                             # Extraer texto del comentario
                             text_elements = comment.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')
                             comment_text = ''.join([t.text for t in text_elements if t.text])
-                            
+
                             if comment_text:
                                 comments.append({
                                     'type': 'comment',
@@ -299,122 +295,122 @@ class CommentExtractorMixin:
                                     'date': date,
                                     'text': comment_text.strip(),
                                 })
-                                
+
                                 if hasattr(self, 'stats'):
                                     self.stats['comments'] = self.stats.get('comments', 0) + 1
-                        
+
                     except Exception as e:
                         logger.debug(f"Error parsing comments part: {e}")
-                        
+
         except Exception as e:
             logger.debug(f"Error in comment extraction: {e}")
-        
+
         return comments
-    
+
     def _extract_paragraph_comments(self, para: Paragraph, all_comments: List[Dict]) -> List[Dict[str, Any]]:
         """
         Extrae comentarios asociados a un párrafo específico.
-        
+
         Args:
             para: Párrafo a analizar
             all_comments: Lista de todos los comentarios del documento
-            
+
         Returns:
             List de comentarios relacionados
         """
         paragraph_comments = []
-        
+
         try:
             # Buscar referencias a comentarios en el párrafo
             comment_refs = para._element.xpath('.//w:commentReference')
-            
+
             for ref in comment_refs:
                 comment_id = ref.get(qn('w:id'))
-                
+
                 # Buscar el comentario correspondiente
                 for comment in all_comments:
                     if comment.get('id') == comment_id:
                         paragraph_comments.append(comment)
                         break
-                        
+
         except Exception as e:
             logger.debug(f"Error extracting paragraph comments: {e}")
-        
+
         return paragraph_comments
 
 
 class FootnoteExtractorMixin:
     """Mixin para extracción de footnotes y endnotes"""
-    
+
     def _extract_footnotes(self, doc: Document) -> Tuple[List[Dict], List[Dict]]:
         """
         Extrae footnotes y endnotes del documento.
-        
+
         Returns:
             Tuple (footnotes_list, endnotes_list)
         """
         footnotes = []
         endnotes = []
-        
+
         try:
             # Buscar parte de footnotes
             for rel in doc.part.rels.values():
                 target = rel.target_ref.lower()
-                
+
                 if "footnote" in target and "endnote" not in target:
                     footnotes.extend(self._parse_notes_part(rel.target_part, 'footnote'))
                 elif "endnote" in target:
                     endnotes.extend(self._parse_notes_part(rel.target_part, 'endnote'))
-                    
+
         except Exception as e:
             logger.debug(f"Error in footnote/endnote extraction: {e}")
-        
+
         if hasattr(self, 'stats'):
             self.stats['footnotes'] = len(footnotes)
             self.stats['endnotes'] = len(endnotes)
-        
+
         return footnotes, endnotes
-    
+
     def _parse_notes_part(self, notes_part, note_type: str) -> List[Dict[str, Any]]:
         """
         Parsea una parte de notas (footnotes o endnotes).
-        
+
         Args:
             notes_part: Parte del documento con notas
             note_type: 'footnote' o 'endnote'
-            
+
         Returns:
             List de dicts con información de notas
         """
         notes = []
-        
+
         try:
             notes_xml = notes_part.element
             note_tag = f'{{{notes_xml.nsmap["w"]}}}{note_type}'
-            
+
             for note in notes_xml.findall(f'.//{note_tag}'):
                 note_id = note.get(qn('w:id'))
-                
+
                 # Extraer texto de la nota
                 text_elements = note.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')
                 note_text = ''.join([t.text for t in text_elements if t.text])
-                
+
                 if note_text and note_id not in ['-1', '0']:  # Saltar notas de separación
                     notes.append({
                         'type': note_type,
                         'id': note_id,
                         'text': note_text.strip(),
                     })
-                    
+
         except Exception as e:
             logger.debug(f"Error parsing {note_type}s: {e}")
-        
+
         return notes
-    
+
     def _extract_paragraph_notes(self, para: Paragraph) -> Dict[str, List[str]]:
         """
         Extrae referencias a footnotes/endnotes en un párrafo.
-        
+
         Returns:
             Dict con 'footnote_refs' y 'endnote_refs'
         """
@@ -422,7 +418,7 @@ class FootnoteExtractorMixin:
             'footnote_refs': [],
             'endnote_refs': []
         }
-        
+
         try:
             # Buscar referencias a footnotes
             footnote_refs = para._element.xpath('.//w:footnoteReference')
@@ -430,102 +426,102 @@ class FootnoteExtractorMixin:
                 ref_id = ref.get(qn('w:id'))
                 if ref_id:
                     note_refs['footnote_refs'].append(ref_id)
-            
+
             # Buscar referencias a endnotes
             endnote_refs = para._element.xpath('.//w:endnoteReference')
             for ref in endnote_refs:
                 ref_id = ref.get(qn('w:id'))
                 if ref_id:
                     note_refs['endnote_refs'].append(ref_id)
-                    
+
         except Exception as e:
             logger.debug(f"Error extracting paragraph note references: {e}")
-        
+
         return note_refs
 
 
 class ShapeExtractorMixin:
     """Mixin para extracción de shapes y SmartArt"""
-    
+
     def _extract_shapes(self, para: Paragraph) -> List[Dict[str, Any]]:
         """
         Extrae shapes (formas) de un párrafo.
-        
+
         Incluye:
         - Shapes básicas (rectángulos, círculos, etc.)
         - WordArt
         - Diagramas
-        
+
         Returns:
             List de dicts con información de shapes
         """
         shapes = []
-        
+
         try:
             # Buscar elementos de shape en el XML
             shape_elements = para._element.xpath('.//v:shape | .//wps:wsp')
-            
+
             for idx, shape in enumerate(shape_elements):
                 shape_info = {
                     'type': 'shape',
                     'index': idx,
                 }
-                
+
                 # Intentar extraer texto del shape (si tiene)
                 text_elements = shape.xpath('.//w:t')
                 shape_text = ''.join([t.text for t in text_elements if t.text])
-                
+
                 if shape_text:
                     shape_info['text'] = shape_text.strip()
                     shape_info['has_text'] = True
                 else:
                     shape_info['has_text'] = False
-                
+
                 # Intentar extraer tipo de shape
                 try:
                     shape_type = shape.get('type', 'unknown')
                     shape_info['shape_type'] = shape_type
                 except:
                     shape_info['shape_type'] = 'unknown'
-                
+
                 shapes.append(shape_info)
-                
+
                 if hasattr(self, 'stats'):
                     self.stats['shapes'] = self.stats.get('shapes', 0) + 1
-                    
+
         except Exception as e:
             logger.debug(f"Error extracting shapes: {e}")
-        
+
         return shapes
-    
+
     def _extract_smartart(self, doc: Document) -> List[Dict[str, Any]]:
         """
         Extrae diagramas SmartArt del documento.
-        
+
         SmartArt es más complejo ya que tiene estructura jerárquica.
-        
+
         Returns:
             List de dicts con información de SmartArt
         """
         smartart_list = []
-        
+
         try:
             # Buscar partes de SmartArt en relationships
             for rel in doc.part.rels.values():
                 if "diagramData" in rel.target_ref.lower():
                     try:
                         smartart_part = rel.target_part
-                        
+
                         smartart_info = {
                             'type': 'smartart',
                             'rel_id': rel.rId,
                             'target': rel.target_ref,
                         }
-                        
+
                         # Intentar extraer texto del SmartArt
                         try:
                             smartart_xml = smartart_part.blob.decode('utf-8')
-                            
+
                             # Buscar elementos de texto en el XML
                             # (esto es simplificado, el XML de SmartArt es complejo)
                             text_matches = re.findall(r'<[^>]*:t[^>]*>([^<]+)</[^>]*:t>', smartart_xml)
@@ -534,70 +530,70 @@ class ShapeExtractorMixin:
                                 smartart_info['has_text'] = True
                             else:
                                 smartart_info['has_text'] = False
-                                
+
                         except:
                             smartart_info['has_text'] = False
-                        
+
                         smartart_list.append(smartart_info)
-                        
+
                         if hasattr(self, 'stats'):
                             self.stats['smartart'] = self.stats.get('smartart', 0) + 1
-                        
+
                     except Exception as e:
                         logger.debug(f"Error extracting SmartArt {rel.rId}: {e}")
-                        
+
         except Exception as e:
             logger.debug(f"Error in SmartArt extraction: {e}")
-        
+
         return smartart_list
 
 
 class BookmarkExtractorMixin:
     """Mixin para extracción de bookmarks internos"""
-    
+
     def _extract_all_bookmarks(self, doc: Document) -> Dict[str, Dict[str, Any]]:
         """
         Extrae todos los bookmarks del documento.
-        
+
         Los bookmarks son marcadores internos que permiten navegación
         y referencias cruzadas.
-        
+
         Returns:
             Dict con bookmark_name -> info
         """
         bookmarks = {}
-        
+
         try:
             # Buscar todos los bookmarks en el documento
             for para in doc.paragraphs:
                 para_bookmarks = self._extract_paragraph_bookmarks(para)
                 bookmarks.update(para_bookmarks)
-                
+
         except Exception as e:
             logger.debug(f"Error in bookmark extraction: {e}")
-        
+
         if hasattr(self, 'stats'):
             self.stats['bookmarks'] = len(bookmarks)
-        
+
         return bookmarks
-    
+
     def _extract_paragraph_bookmarks(self, para: Paragraph) -> Dict[str, Dict[str, Any]]:
         """
         Extrae bookmarks de un párrafo específico.
-        
+
         Returns:
             Dict con bookmark_name -> info
         """
         bookmarks = {}
-        
+
         try:
             # Buscar elementos de bookmark start
             bookmark_starts = para._element.xpath('.//w:bookmarkStart')
-            
+
             for bookmark in bookmark_starts:
                 bookmark_name = bookmark.get(qn('w:name'))
                 bookmark_id = bookmark.get(qn('w:id'))
-                
+
                 if bookmark_name:
                     bookmarks[bookmark_name] = {
                         'type': 'bookmark',
@@ -605,62 +601,62 @@ class BookmarkExtractorMixin:
                         'name': bookmark_name,
                         'paragraph_text': para.text[:100] + '...' if len(para.text) > 100 else para.text,
                     }
-                    
+
         except Exception as e:
             logger.debug(f"Error extracting paragraph bookmarks: {e}")
-        
+
         return bookmarks
 
 
 class ParallelProcessingMixin:
     """Mixin para procesamiento paralelo de documentos grandes"""
-    
+
     def _should_use_parallel_processing(self, doc: Document) -> bool:
         """
         Determina si el documento es lo suficientemente grande
         para beneficiarse del procesamiento paralelo.
-        
+
         Args:
             doc: Documento a analizar
-            
+
         Returns:
             bool: True si debe usar procesamiento paralelo
         """
         # Umbral: documentos con más de 100 párrafos o 50 tablas
         return len(doc.paragraphs) > 100 or len(doc.tables) > 50
-    
+
     def _process_sections_parallel(
-        self, 
-        sections: List[DocumentSection], 
+        self,
+        sections: List[DocumentSection],
         max_workers: int = 4
     ) -> List[DocumentSection]:
         """
         Procesa secciones en paralelo para mejorar rendimiento.
-        
+
         Útil para documentos muy grandes donde cada sección puede
         procesarse independientemente.
-        
+
         Args:
             sections: Lista de secciones a procesar
             max_workers: Número máximo de workers paralelos
-            
+
         Returns:
             Lista de secciones procesadas
         """
         if not sections or len(sections) < 10:
             # No vale la pena paralelizar para documentos pequeños
             return sections
-        
+
         processed_sections = []
-        
+
         try:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # Enviar cada sección a procesamiento
                 future_to_section = {
-                    executor.submit(self._enrich_section_metadata, section): section 
+                    executor.submit(self._enrich_section_metadata, section): section
                     for section in sections
                 }
-                
+
                 # Recolectar resultados
                 for future in as_completed(future_to_section):
                     try:
@@ -670,33 +666,33 @@ class ParallelProcessingMixin:
                         original_section = future_to_section[future]
                         logger.error(f"Error processing section '{original_section.title}': {e}")
                         processed_sections.append(original_section)
-                        
+
         except Exception as e:
             logger.error(f"Error in parallel processing: {e}")
             return sections  # Fallback a secciones originales
-        
+
         # Reordenar para mantener el orden original
         section_order = {id(s): i for i, s in enumerate(sections)}
         processed_sections.sort(key=lambda s: section_order.get(id(s), 999999))
-        
+
         return processed_sections
-    
+
     def _enrich_section_metadata(self, section: DocumentSection) -> DocumentSection:
         """
         Enriquece la metadata de una sección con análisis adicional.
-        
+
         Esta función está diseñada para ser ejecutada en paralelo.
-        
+
         Args:
             section: Sección a enriquecer
-            
+
         Returns:
             Sección con metadata enriquecida
         """
         try:
             # Análisis adicional de la sección
             content = section.content
-            
+
             # Análisis de complejidad
             section.metadata['enrichment'] = {
                 'char_count': len(content),
@@ -705,10 +701,10 @@ class ParallelProcessingMixin:
                 'has_technical_terms': bool(re.search(r'\b[A-Z]{2,}\b', content)),
                 'code_blocks': len(re.findall(r'```[\s\S]*?```', content)),
             }
-            
+
         except Exception as e:
             logger.debug(f"Error enriching section metadata: {e}")
-        
+
         return section
 
 
@@ -727,7 +723,7 @@ class WordLoaderUniversal(
 ):
     """
     Cargador Universal de Documentos Word con Extracción Completa
-    
+
     Hereda de múltiples mixins para funcionalidades avanzadas:
     - ChartExtractorMixin: Gráficos embebidos
     - CommentExtractorMixin: Comentarios y notas
@@ -735,7 +731,7 @@ class WordLoaderUniversal(
     - ShapeExtractorMixin: Shapes y SmartArt
     - BookmarkExtractorMixin: Bookmarks internos
     - ParallelProcessingMixin: Procesamiento paralelo
-    
+
     Características:
     - Extrae texto, tablas, imágenes, listas, formato
     - Detecta hyperlinks, ecuaciones, cuadros de texto
@@ -760,7 +756,7 @@ class WordLoaderUniversal(
         self.max_workers = max_workers
         self.clean_text = clean_text
         self.text_cleaner = TextCleaner() if clean_text else None
-        
+
         # Estadísticas de extracción extendidas
         self.stats = {
             "paragraphs": 0,
@@ -779,7 +775,7 @@ class WordLoaderUniversal(
             "smartart": 0,
             "bookmarks": 0,
         }
-        
+
         # Cache para elementos extraídos globalmente
         self._global_cache = {
             'comments': [],
@@ -793,18 +789,18 @@ class WordLoaderUniversal(
     def load(self, file_path: Path, original_filename: str = None) -> ProcessedDocument:
         """
         Carga un documento Word con extracción completa.
-        
+
         Compatible con FileProcessor.process_file()
-        
+
         Args:
             file_path: Ruta al archivo .docx
             original_filename: Nombre original del archivo (opcional)
-            
+
         Returns:
             ProcessedDocument con metadata completa para Qdrant
         """
         logger.info(f"🚀 Loading Word document: {file_path}")
-        
+
         # Reset estadísticas y cache
         self.stats = {k: 0 for k in self.stats}
         self._global_cache = {
@@ -815,7 +811,7 @@ class WordLoaderUniversal(
             'smartart': [],
             'bookmarks': {},
         }
-        
+
         try:
             doc = Document(file_path)
         except Exception as e:
@@ -829,7 +825,7 @@ class WordLoaderUniversal(
         # 2. Extraer metadata del documento
         logger.info("📦 Extracting metadata...")
         metadata = self._extract_metadata(doc, file_path)
-        
+
         # Agregar elementos globales a metadata
         metadata['global_elements'] = {
             'chart_count': len(self._global_cache['charts']),
@@ -843,7 +839,7 @@ class WordLoaderUniversal(
         # 3. Extraer secciones con metadata enriquecida
         logger.info("📦 Extracting sections...")
         sections = self.extract_sections(doc, metadata)
-        
+
         # 4. Procesamiento paralelo si está habilitado y el documento es grande
         if self.enable_parallel and self._should_use_parallel_processing(doc):
             logger.info(f"⚡ Using parallel processing with {self.max_workers} workers")
@@ -851,7 +847,7 @@ class WordLoaderUniversal(
 
         logger.info(f"✅ Extracted {len(sections)} sections from {file_path}")
         logger.info(f"📊 Stats: {json.dumps(self.stats, indent=2)}")
-        
+
         # 5. Generar contenido completo
         logger.info("📦 Generating full content...")
         content = self._generate_full_content(sections)
@@ -876,23 +872,23 @@ class WordLoaderUniversal(
     def _extract_global_elements(self, doc: Document):
         """
         Extrae elementos globales del documento una sola vez.
-        
+
         Esto mejora el rendimiento al evitar múltiples pasadas.
         """
         # Extraer comentarios
         self._global_cache['comments'] = self._extract_all_comments(doc)
-        
+
         # Extraer footnotes y endnotes
         footnotes, endnotes = self._extract_footnotes(doc)
         self._global_cache['footnotes'] = footnotes
         self._global_cache['endnotes'] = endnotes
-        
+
         # Extraer gráficos
         self._global_cache['charts'] = self._extract_charts(doc)
-        
+
         # Extraer SmartArt
         self._global_cache['smartart'] = self._extract_smartart(doc)
-        
+
         # Extraer bookmarks
         self._global_cache['bookmarks'] = self._extract_all_bookmarks(doc)
 
@@ -903,28 +899,28 @@ class WordLoaderUniversal(
     def _extract_metadata(self, doc: Document, file_path: Path) -> Dict[str, Any]:
         """
         Extrae metadata completa del documento Word.
-        
+
         Esta metadata se agrega a CADA chunk en Qdrant vía FileProcessor.
-        
+
         Returns:
             dict: Metadatos del documento para indexar en Qdrant
         """
         core_props = doc.core_properties
-        
+
         # Estadísticas del archivo
         logger.info("📦 Extracting file stats...")
         file_stats = file_path.stat()
-        
+
         # Contar elementos
         logger.info("📦 Counting elements...")
         total_paragraphs = len(doc.paragraphs)
         total_tables = len(doc.tables)
-        
+
         # Detectar idioma (simple heurística basada en contenido)
         sample_text = " ".join([p.text for p in doc.paragraphs[:10] if p.text.strip()])
         detected_language = self._detect_language(sample_text)
         logger.info(f"📦 Detected language: {detected_language}")
-        
+
         # Función helper para extraer propiedades de forma segura
         def safe_get_prop(prop_name: str, default: str = '') -> str:
             """Extrae propiedad de forma segura, retorna default si no existe"""
@@ -933,7 +929,7 @@ class WordLoaderUniversal(
                 return str(value) if value is not None else default
             except (AttributeError, TypeError):
                 return default
-        
+
         # Extraer fechas de forma segura
         def safe_get_date(prop_name: str) -> str:
             """Extrae fecha de forma segura, retorna ISO string o vacío"""
@@ -942,17 +938,17 @@ class WordLoaderUniversal(
                 return date_obj.isoformat() if date_obj else ''
             except (AttributeError, TypeError):
                 return ''
-        
+
         logger.info("📦 Extracting metadata...")
-        
+
         # Extraer autor y validar inmediatamente
         raw_author = safe_get_prop('author')
         logger.info(f"Autor extraído de core_properties: {raw_author}")
-        
+
         # Validar si el autor de core_properties es válido (no es "autor" o valores genéricos)
         doc_author = raw_author
         doc_author_source = 'core_properties' if raw_author else 'unknown'
-        
+
         if raw_author:
             # Valores genéricos que no son nombres reales de autores
             invalid_author_values = {
@@ -960,18 +956,18 @@ class WordLoaderUniversal(
                 'sin autor', 'sin nombre', 'n/a', 'n/a', 'n/a', 'n/a', 'n/a',
                 'user', 'usuario', 'default', 'plantilla', 'template'
             }
-            
+
             # Normalizar el autor para validación
             author_lower = raw_author.strip().lower()
 
             logger.info(f"Autor normalizado: {author_lower}")
-            
+
             # Verificar si el autor es un valor genérico inválido
             if author_lower in invalid_author_values or not author_lower:
                 logger.info(f"⚠️  Autor inválido encontrado en metadata: '{raw_author}'")
                 doc_author = ''  # Limpiar el autor inválido
                 doc_author_source = 'unknown'
-        
+
         # --- Fallback: intentar extraer el autor desde tablas (incluyendo nested) ---
         if not doc_author:
             logger.info("No se encontró autor en core_properties, intentando extraer desde tablas")
@@ -979,7 +975,7 @@ class WordLoaderUniversal(
             if table_author:
                 doc_author = table_author
                 doc_author_source = 'table'
-        
+
         # Crear diccionario de metadata con autor validado
         metadata = {
             # ========================================================================
@@ -995,13 +991,13 @@ class WordLoaderUniversal(
             'doc_company': safe_get_prop('company'),
             'doc_last_modified_by': safe_get_prop('last_modified_by'),
             'doc_revision': safe_get_prop('revision', '1'),
-            
+
             # ========================================================================
             # FECHAS (ISO 8601 para fácil filtrado en Qdrant)
             # ========================================================================
             'doc_created_date': safe_get_date('created'),
             'doc_modified_date': safe_get_date('modified'),
-            
+
             # ========================================================================
             # INFORMACIÓN DEL ARCHIVO (para filtros en Qdrant)
             # ========================================================================
@@ -1009,16 +1005,16 @@ class WordLoaderUniversal(
             'file_extension': file_path.suffix,
             'file_size_bytes': file_stats.st_size,
             'file_type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            
+
             # ========================================================================
             # ESTADÍSTICAS DEL DOCUMENTO
             # ========================================================================
             'total_paragraphs': total_paragraphs,
             'total_tables': total_tables,
             'language': detected_language,
-            
+
             # METADATOS DE PROCESAMIENTO
-            'indexed_at': datetime.utcnow().isoformat(),
+            'indexed_at': get_current_utc_iso(),
             'processing_version': '2.5',
             'loader_type': 'WordLoaderUniversal',
             'parallel_processing_enabled': self.enable_parallel,
@@ -1081,7 +1077,7 @@ class WordLoaderUniversal(
         logger.info(f"🔍 Analizando {len(self._enumerate_all_tables(doc))} tablas en el documento")
         for table_idx, table in enumerate(self._enumerate_all_tables(doc)):
             logger.info(f"📊 Procesando tabla {table_idx + 1}: {len(table.rows)} filas, {len(table.columns) if table.rows else 0} columnas")
-            
+
             if not table.rows:
                 logger.info(f"  ⚠️  Tabla {table_idx + 1} no tiene filas, saltando")
                 continue
@@ -1117,7 +1113,7 @@ class WordLoaderUniversal(
                     # Mostrar contenido de todas las celdas de la fila
                     row_cells_content = [cell.text.strip() for cell in row.cells]
                     logger.info(f"    📄 Fila {row_idx}: {len(row.cells)} celdas -> {row_cells_content}")
-                    
+
                     if author_col_idx >= len(row.cells):
                         logger.info(f"    ⚠️  Fila {row_idx}: índice de columna {author_col_idx} fuera de rango ({len(row.cells)} celdas)")
                         continue
@@ -1152,7 +1148,7 @@ class WordLoaderUniversal(
         # Regresar el autor con mayor prioridad
         # Prioridad 1: Autor de "Preparación" (el más específico)
         # Prioridad 2: Autor de columna "Autor" (el más reciente)
-        
+
         # Buscar primero si hay algún autor de "Preparación"
         for val in reversed(author_candidates):
             cleaned = re.sub(r'\s+', ' ', val).strip()
@@ -1161,48 +1157,48 @@ class WordLoaderUniversal(
                 # Necesitamos rastrear de dónde vino cada autor
                 # Por ahora, asumimos que si hay múltiples, el de preparación debería ser el correcto
                 # Podemos identificarlo por el contexto o simplemente priorizarlo
-                
+
                 # Para identificar el autor de preparación, necesitamos modificar la lógica
                 # Vamos a cambiar el enfoque: almacenar tuplas (autor, tipo)
                 pass
-        
+
         # Regresar todos los autores posibles (con distinct)
         if not author_candidates:
             logger.info("❌ No se encontró ningún autor válido en las tablas")
             return None
-        
+
         # Limpiar y eliminar duplicados manteniendo el orden
         cleaned_authors = []
         seen = set()
-        
+
         for val in author_candidates:
             cleaned = re.sub(r'\s+', ' ', val).strip()
             if cleaned and cleaned not in seen:
                 cleaned_authors.append(cleaned)
                 seen.add(cleaned)
-        
+
         logger.info(f"✅ Autores encontrados (sin duplicados): {cleaned_authors}")
-        
+
         # Retornar el primer autor (el más reciente/confiable)
         # Pero ahora tienes todos los autores disponibles si necesitas usarlos
         if cleaned_authors:
             logger.info(f"✅ Usando primer autor como autor final: '{cleaned_authors[0]}'")
             return cleaned_authors[0]
-        
+
         return None
-    
+
     def _detect_language(self, text: str) -> str:
         """Detecta el idioma del texto (heurística simple)"""
         if not text or len(text) < 10:
             return 'unknown'
-        
+
         spanish_words = ['el', 'la', 'de', 'que', 'y', 'en', 'los', 'del', 'se', 'las', 'es', 'por', 'para', 'con']
         english_words = ['the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have', 'it', 'is', 'for', 'on', 'with']
-        
+
         text_lower = text.lower()
         spanish_count = sum(1 for word in spanish_words if f' {word} ' in text_lower)
         english_count = sum(1 for word in english_words if f' {word} ' in text_lower)
-        
+
         if spanish_count > english_count:
             return 'es'
         elif english_count > spanish_count:
@@ -1216,14 +1212,14 @@ class WordLoaderUniversal(
     def _extract_table_content(self, table: Table, table_index: int, depth: int = 0) -> Tuple[str, Dict]:
         """
         Extrae contenido de tabla en formato legible + metadata.
-        
+
         SOPORTA TABLAS ANIDADAS (nested tables dentro de celdas)
-        
+
         Args:
             table: Tabla a procesar
             table_index: Índice de la tabla
             depth: Profundidad de anidación (para tablas dentro de tablas)
-        
+
         Returns:
             tuple: (contenido_formateado, metadata_tabla)
         """
@@ -1232,19 +1228,19 @@ class WordLoaderUniversal(
         row_count = 0
         has_merged_cells = False
         has_nested_tables = False
-        
+
         for idx, row in enumerate(table.rows):
             row_cells = []
-            
+
             for cell in row.cells:
                 # EXTRACCIÓN RECURSIVA DE CONTENIDO DE CELDA
                 cell_content = self._extract_cell_content(cell, depth)
                 row_cells.append(cell_content)
-                
+
                 # Detectar si la celda tiene tablas anidadas
                 if '[NESTED_TABLE' in cell_content:
                     has_nested_tables = True
-                
+
                 # Detectar celdas fusionadas
                 try:
                     if hasattr(cell._element, 'tcPr'):
@@ -1260,16 +1256,16 @@ class WordLoaderUniversal(
                                 has_merged_cells = True
                 except (AttributeError, TypeError) as e:
                     logger.debug(f"Error detecting merged cells: {e}")
-            
+
             row_text = ' | '.join(row_cells)
             if row_text.strip():
                 table_text.append(row_text)
                 row_count += 1
-                
+
                 # Primera fila como headers
                 if idx == 0:
                     headers = row_cells
-        
+
         # Metadata de la tabla
         table_metadata = {
             'is_table': True,
@@ -1283,7 +1279,7 @@ class WordLoaderUniversal(
             'has_nested_tables': has_nested_tables,
             'nesting_depth': depth,
         }
-        
+
         content = '\n'.join(table_text) if table_text else ''
 
         # Clean table content if cleaner is enabled
@@ -1297,26 +1293,26 @@ class WordLoaderUniversal(
                     f"{len(headers)} cols, nested={has_nested_tables}")
 
         return content, table_metadata
-    
+
     def _extract_cell_content(self, cell: _Cell, depth: int = 0) -> str:
         """
         Extrae contenido completo de una celda, incluyendo:
         - Texto de párrafos
         - Tablas anidadas (recursivamente)
         - Formato especial
-        
+
         MEJORADO: Ahora detecta tablas en cualquier posición de la celda
-        
+
         Args:
             cell: Celda a procesar
             depth: Profundidad de anidación
-            
+
         Returns:
             str: Contenido formateado de la celda
         """
         cell_parts = []
         nested_table_counter = 0
-        
+
         try:
             # Método 1: Iterar sobre elementos directos de la celda
             for element in cell._element:
@@ -1326,38 +1322,38 @@ class WordLoaderUniversal(
                     text = para.text.strip()
                     if text:
                         cell_parts.append(text)
-                
+
                 # Es una tabla anidada
                 elif isinstance(element, CT_Tbl):
                     nested_table = Table(element, cell._parent)
-                    
+
                     # Extraer tabla anidada recursivamente
                     nested_content, nested_metadata = self._extract_table_content(
-                        nested_table, 
+                        nested_table,
                         nested_table_counter,
                         depth=depth + 1
                     )
-                    
+
                     if nested_content:
                         # Formatear tabla anidada con indentación
                         indent = "  " * depth
                         nested_formatted = f"\n{indent}[NESTED_TABLE_L{depth+1}]\n"
-                        
+
                         # Indentar cada línea de la tabla anidada
                         for line in nested_content.split('\n'):
                             if line.strip():  # Solo líneas no vacías
                                 nested_formatted += f"{indent}  {line}\n"
-                        
+
                         nested_formatted += f"{indent}[/NESTED_TABLE_L{depth+1}]"
                         cell_parts.append(nested_formatted)
-                        
+
                         nested_table_counter += 1
-                        
+
                         # Contar tabla anidada en stats
                         self.stats["nested_tables"] = self.stats.get("nested_tables", 0) + 1
-                        
+
                         logger.debug(f"  {'  ' * depth}└─ Found nested table at depth {depth+1}")
-            
+
             # Método 2: Buscar tablas que puedan estar en estructuras complejas
             # (algunas veces las tablas están dentro de otros contenedores)
             if nested_table_counter == 0:
@@ -1366,43 +1362,43 @@ class WordLoaderUniversal(
                 for idx, tbl_element in enumerate(nested_tables_xml):
                     try:
                         nested_table = Table(tbl_element, cell._parent)
-                        
+
                         nested_content, nested_metadata = self._extract_table_content(
                             nested_table,
                             idx,
                             depth=depth + 1
                         )
-                        
+
                         if nested_content:
                             indent = "  " * depth
                             nested_formatted = f"\n{indent}[NESTED_TABLE_L{depth+1}_ALT]\n"
-                            
+
                             for line in nested_content.split('\n'):
                                 if line.strip():
                                     nested_formatted += f"{indent}  {line}\n"
-                            
+
                             nested_formatted += f"{indent}[/NESTED_TABLE_L{depth+1}_ALT]"
                             cell_parts.append(nested_formatted)
-                            
+
                             self.stats["nested_tables"] = self.stats.get("nested_tables", 0) + 1
-                            
+
                             logger.debug(f"  {'  ' * depth}└─ Found nested table via XPath at depth {depth+1}")
                     except Exception as e:
                         logger.debug(f"Error extracting nested table via XPath: {e}")
-        
+
         except Exception as e:
             logger.error(f"Error extracting cell content at depth {depth}: {e}")
             # Fallback al método antiguo
             return cell.text.strip()
-        
+
         # Unir todas las partes de la celda
         result = ' '.join(cell_parts) if cell_parts else ''
-        
+
         # Log para debugging
         if depth <= 2 and result:  # Solo log primeros niveles
             preview = result[:100] + '...' if len(result) > 100 else result
             logger.debug(f"  {'  ' * depth}Cell content (depth={depth}): {preview}")
-        
+
         return result
 
     # =========================================================================
@@ -1412,14 +1408,14 @@ class WordLoaderUniversal(
     def _extract_paragraph_formatting(self, para: Paragraph) -> Dict[str, Any]:
         """
         Extrae información de formato del párrafo.
-        
+
         Returns:
             dict: Información de formato para metadata
         """
         has_bold = any(run.bold for run in para.runs if run.bold)
         has_italic = any(run.italic for run in para.runs if run.italic)
         has_underline = any(run.underline for run in para.runs if run.underline)
-        
+
         # Detectar listas
         is_list = para.style.name.startswith('List')
         list_level = None
@@ -1428,7 +1424,7 @@ class WordLoaderUniversal(
             level_match = re.search(r'\d+', para.style.name)
             list_level = int(level_match.group()) if level_match else 1
             self.stats["lists"] += 1
-        
+
         # Tamaño de fuente promedio
         font_sizes = []
         for run in para.runs:
@@ -1437,9 +1433,9 @@ class WordLoaderUniversal(
                     font_sizes.append(run.font.size.pt)
             except:
                 pass
-        
+
         avg_font_size = sum(font_sizes) / len(font_sizes) if font_sizes else 11
-        
+
         # Detectar colores
         has_colored_text = False
         for run in para.runs:
@@ -1449,7 +1445,7 @@ class WordLoaderUniversal(
                     break
             except:
                 pass
-        
+
         return {
             'has_bold_text': has_bold,
             'has_italic_text': has_italic,
@@ -1481,18 +1477,18 @@ class WordLoaderUniversal(
     def _extract_hyperlinks(self, para: Paragraph) -> List[Dict[str, str]]:
         """
         Extrae hyperlinks de un párrafo.
-        
+
         Returns:
             List de dicts con {text, url}
         """
         hyperlinks = []
-        
+
         try:
             for hyperlink in para._element.xpath('.//w:hyperlink'):
                 # Texto del hyperlink
                 text_elements = hyperlink.xpath('.//w:t')
                 text = ''.join([t.text for t in text_elements if t.text])
-                
+
                 # URL del hyperlink
                 rId = hyperlink.get(qn('r:id'))
                 if rId:
@@ -1507,24 +1503,24 @@ class WordLoaderUniversal(
                         pass
         except Exception as e:
             logger.debug(f"Error extracting hyperlinks: {e}")
-        
+
         return hyperlinks
 
     def _extract_images(self, para: Paragraph) -> List[Dict[str, Any]]:
         """
         Extrae imágenes de un párrafo.
-        
+
         Returns:
             List de dicts con información de imagen
         """
         images = []
-        
+
         try:
             # Buscar imágenes en runs
             for run in para.runs:
                 # Buscar elementos de imagen en el XML
                 inline_shapes = run._element.xpath('.//a:blip')
-                
+
                 for blip in inline_shapes:
                     # Obtener rId de la imagen
                     rId = blip.get(qn('r:embed'))
@@ -1533,10 +1529,10 @@ class WordLoaderUniversal(
                             # Obtener la imagen del documento
                             image_part = para.part.related_parts[rId]
                             image_bytes = image_part.blob
-                            
+
                             # Convertir a base64 (opcional)
                             image_base64 = base64.b64encode(image_bytes).decode('utf-8')
-                            
+
                             # Metadata de la imagen
                             image_info = {
                                 'type': 'image',
@@ -1545,45 +1541,45 @@ class WordLoaderUniversal(
                                 'base64': image_base64[:100] + '...',
                                 'rId': rId,
                             }
-                            
+
                             images.append(image_info)
                             self.stats["images"] += 1
-                            
+
                         except Exception as e:
                             logger.debug(f"Error extracting image {rId}: {e}")
         except Exception as e:
             logger.debug(f"Error in image extraction: {e}")
-        
+
         return images
 
     def _extract_textboxes(self, para: Paragraph) -> List[str]:
         """
         Extrae texto de cuadros de texto (textboxes).
-        
+
         Returns:
             List de textos de textboxes
         """
         textboxes = []
-        
+
         try:
             # Buscar textboxes en el XML
             for textbox in para._element.xpath('.//w:txbxContent'):
                 textbox_paras = textbox.xpath('.//w:t')
                 textbox_text = ''.join([t.text for t in textbox_paras if t.text])
-                
+
                 if textbox_text.strip():
                     textboxes.append(textbox_text.strip())
                     self.stats["textboxes"] += 1
-                    
+
         except Exception as e:
             logger.debug(f"Error extracting textboxes: {e}")
-        
+
         return textboxes
 
     def _detect_equations(self, para: Paragraph) -> bool:
         """
         Detecta si el párrafo contiene ecuaciones matemáticas.
-        
+
         Returns:
             bool: True si contiene ecuaciones
         """
@@ -1595,7 +1591,7 @@ class WordLoaderUniversal(
                 return True
         except Exception as e:
             logger.debug(f"Error detecting equations: {e}")
-        
+
         return False
 
     # =========================================================================
@@ -1625,13 +1621,13 @@ class WordLoaderUniversal(
     def extract_sections(self, doc: Document, doc_metadata: Dict) -> List[DocumentSection]:
         """
         Extrae secciones con metadata enriquecida para cada chunk.
-        
+
         Compatible con FileProcessor para construcción de payloads Qdrant.
-        
+
         Args:
             doc: Documento Word
             doc_metadata: Metadatos del documento completo
-            
+
         Returns:
             List[DocumentSection]: Secciones con metadata completa
         """
@@ -1642,12 +1638,12 @@ class WordLoaderUniversal(
         current_chunk_metadata = []
         pre_heading_content = []
         pre_heading_metadata = []
-        
+
         # Contadores globales
         paragraph_index = 0
         char_position = 0
         table_counter = 0
-        
+
         # Breadcrumb jerárquico
         breadcrumb = []
         heading_stack = [None] * 6  # H1-H6
@@ -1656,7 +1652,7 @@ class WordLoaderUniversal(
 
         # Iterar sobre todos los elementos
         for block in self._iter_block_items(doc):
-            
+
             if isinstance(block, Paragraph):
                 para = block
 
@@ -1892,11 +1888,11 @@ class WordLoaderUniversal(
                 # PROCESAR TABLA
                 # ====================================================================
                 table_content, table_metadata = self._extract_table_content(block, table_counter)
-                
+
                 if table_content:
                     # Formato con marcadores
                     table_formatted = f"[TABLA {table_counter + 1}]\n{table_content}\n[/TABLA]"
-                    
+
                     # Metadata completa de la tabla
                     chunk_meta = {
                         'paragraph_index': paragraph_index,
@@ -1907,14 +1903,14 @@ class WordLoaderUniversal(
                         **table_metadata,
                         **self._detect_content_types(table_content),
                     }
-                    
+
                     if current_section:
                         current_content.append(table_formatted)
                         current_chunk_metadata.append(chunk_meta)
                     else:
                         pre_heading_content.append(table_formatted)
                         pre_heading_metadata.append(chunk_meta)
-                    
+
                     char_position += len(table_formatted) + 1
                     paragraph_index += 1
                     table_counter += 1
@@ -1966,10 +1962,10 @@ class WordLoaderUniversal(
                         'paragraph_count': len(current_chunk_metadata),
                     }
                 ))
-        
+
         logger.info(f"✅ Extraction complete: {len(sections)} sections, "
                    f"{paragraph_index} paragraphs, {table_counter} tables")
-        
+
         return sections
 
     def _generate_full_content(self, sections: List[DocumentSection]) -> str:
@@ -1986,16 +1982,16 @@ class WordLoaderUniversal(
             full_content.append("")  # Línea en blanco entre secciones
 
         return '\n'.join(full_content).strip()
-    
+
     def debug_table_structure(self, file_path: Path) -> Dict[str, Any]:
         """
         Método de debugging para analizar estructura de tablas.
-        
+
         Útil para diagnosticar problemas con tablas anidadas.
-        
+
         Args:
             file_path: Ruta al documento
-            
+
         Returns:
             Dict con información detallada de estructura
         """
@@ -2003,12 +1999,12 @@ class WordLoaderUniversal(
             doc = Document(file_path)
         except Exception as e:
             return {"error": str(e)}
-        
+
         structure = {
             "total_tables": len(doc.tables),
             "tables": []
         }
-        
+
         for table_idx, table in enumerate(doc.tables):
             table_info = {
                 "index": table_idx,
@@ -2016,13 +2012,13 @@ class WordLoaderUniversal(
                 "columns": len(table.columns) if table.rows else 0,
                 "cells_with_nested_tables": []
             }
-            
+
             # Analizar cada celda
             for row_idx, row in enumerate(table.rows):
                 for col_idx, cell in enumerate(row.cells):
                     # Buscar tablas anidadas en la celda
                     nested_tables = cell._element.xpath('.//w:tbl')
-                    
+
                     if nested_tables:
                         cell_info = {
                             "position": f"row_{row_idx}_col_{col_idx}",
@@ -2030,9 +2026,9 @@ class WordLoaderUniversal(
                             "cell_text_preview": cell.text[:100] if cell.text else ""
                         }
                         table_info["cells_with_nested_tables"].append(cell_info)
-            
+
             structure["tables"].append(table_info)
-        
+
         return structure
 
 

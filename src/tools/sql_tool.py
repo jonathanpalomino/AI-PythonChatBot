@@ -7,12 +7,10 @@ Tool for executing SQL queries against supported databases (PostgreSQL, MySQL, O
 """
 
 from typing import List, Dict, Any, Optional
-import json
 
-import httpx
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy import text, select
+from sqlalchemy import text
 from sqlalchemy.engine import URL
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.tools.base_tool import BaseTool, ToolCategory, ToolParameter, ToolResult
@@ -118,6 +116,71 @@ class SQLTool(BaseTool):
         ]
 
     # =============================================================================
+    # Helper Methods
+    # =============================================================================
+
+    def _get_default_port(self, database_type: str) -> int:
+        """Get default port for database type"""
+        port_map = {
+            "postgresql": 5432,
+            "mysql": 3306,
+            "oracle": 1521
+        }
+        return port_map.get(database_type)
+
+    def _create_database_url(
+        self,
+        database_type: str,
+        username: str,
+        password: str,
+        host: str,
+        port: Optional[int],
+        database: str
+    ) -> Optional[URL]:
+        """Create database URL based on type"""
+        if database_type == "postgresql":
+            return URL.create(
+                drivername="postgresql+asyncpg",
+                username=username,
+                password=password,
+                host=host,
+                port=port,
+                database=database
+            )
+        elif database_type == "mysql":
+            return URL.create(
+                drivername="mysql+asyncmy",
+                username=username,
+                password=password,
+                host=host,
+                port=port,
+                database=database
+            )
+        elif database_type == "oracle":
+            # Oracle connection string format
+            if ":" in host:
+                # Host:port format
+                return URL.create(
+                    drivername="oracle+asyncoracledriver",
+                    username=username,
+                    password=password,
+                    host=host,
+                    port=port,
+                    database=database
+                )
+            else:
+                # SID or service name format
+                return URL.create(
+                    drivername="oracle+asyncoracledriver",
+                    username=username,
+                    password=password,
+                    host=host,
+                    port=port,
+                    database=f"{host}:{port}/{database}"
+                )
+        return None
+
+    # =============================================================================
     # Execution
     # =============================================================================
 
@@ -147,57 +210,21 @@ class SQLTool(BaseTool):
                 fetch_size=fetch_size
             )
 
-            # Set default ports
+            # Set default port if not provided
             if port is None:
-                if database_type == "postgresql":
-                    port = 5432
-                elif database_type == "mysql":
-                    port = 3306
-                elif database_type == "oracle":
-                    port = 1521
+                port = self._get_default_port(database_type)
 
             # Create database URL
-            if database_type == "postgresql":
-                db_url = URL.create(
-                    drivername="postgresql+asyncpg",
-                    username=username,
-                    password=password,
-                    host=host,
-                    port=port,
-                    database=database
-                )
-            elif database_type == "mysql":
-                db_url = URL.create(
-                    drivername="mysql+asyncmy",
-                    username=username,
-                    password=password,
-                    host=host,
-                    port=port,
-                    database=database
-                )
-            elif database_type == "oracle":
-                # Oracle connection string format
-                if ":" in host:
-                    # Host:port format
-                    db_url = URL.create(
-                        drivername="oracle+asyncoracledriver",
-                        username=username,
-                        password=password,
-                        host=host,
-                        port=port,
-                        database=database
-                    )
-                else:
-                    # SID or service name format
-                    db_url = URL.create(
-                        drivername="oracle+asyncoracledriver",
-                        username=username,
-                        password=password,
-                        host=host,
-                        port=port,
-                        database=f"{host}:{port}/{database}"
-                    )
-            else:
+            db_url = self._create_database_url(
+                database_type=database_type,
+                username=username,
+                password=password,
+                host=host,
+                port=port,
+                database=database
+            )
+
+            if db_url is None:
                 return ToolResult(
                     success=False,
                     data=None,
@@ -308,44 +335,21 @@ class SQLTool(BaseTool):
     ) -> ToolResult:
         """Test database connection"""
         try:
-            # Set default ports
+            # Set default port if not provided
             if port is None:
-                if database_type == "postgresql":
-                    port = 5432
-                elif database_type == "mysql":
-                    port = 3306
-                elif database_type == "oracle":
-                    port = 1521
+                port = self._get_default_port(database_type)
 
             # Create database URL
-            if database_type == "postgresql":
-                db_url = URL.create(
-                    drivername="postgresql+asyncpg",
-                    username=username,
-                    password=password,
-                    host=host,
-                    port=port,
-                    database=database
-                )
-            elif database_type == "mysql":
-                db_url = URL.create(
-                    drivername="mysql+asyncmy",
-                    username=username,
-                    password=password,
-                    host=host,
-                    port=port,
-                    database=database
-                )
-            elif database_type == "oracle":
-                db_url = URL.create(
-                    drivername="oracle+asyncoracledriver",
-                    username=username,
-                    password=password,
-                    host=host,
-                    port=port,
-                    database=database
-                )
-            else:
+            db_url = self._create_database_url(
+                database_type=database_type,
+                username=username,
+                password=password,
+                host=host,
+                port=port,
+                database=database
+            )
+
+            if db_url is None:
                 return ToolResult(
                     success=False,
                     data=None,

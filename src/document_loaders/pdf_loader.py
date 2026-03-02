@@ -34,15 +34,11 @@ class PDFLoader(BaseDocumentLoader):
             # Extraer secciones basadas en el contenido
             sections = self.extract_sections(full_text)
 
-            # Generar contenido completo desde las secciones
+            # Generar contenido completo desde las secciones (usar método de clase base)
             content = self._generate_full_content(sections)
 
-            # Convertir a ruta relativa
-            abs_path = file_path if file_path.is_absolute() else file_path.resolve()
-            try:
-                relative_path = abs_path.relative_to(Path.cwd())
-            except ValueError:
-                relative_path = abs_path
+            # Usar método compartido para obtener ruta relativa
+            relative_path = self.get_relative_path(file_path)
 
             return ProcessedDocument(
                 file_path=str(relative_path),
@@ -250,16 +246,3 @@ class PDFLoader(BaseDocumentLoader):
                             return True, 2, line.strip()
 
         return False, 0, line
-
-    def _generate_full_content(self, sections: List[DocumentSection]) -> str:
-        """Genera el contenido completo del documento desde las secciones"""
-        full_content = []
-
-        for section in sections:
-            # Agregar título de sección con formato markdown
-            header_prefix = '#' * (section.level if section.level > 0 else 1)
-            full_content.append(f"{header_prefix} {section.title}")
-            full_content.append(section.content)
-            full_content.append("")  # Línea en blanco entre secciones
-
-        return '\n'.join(full_content).strip()

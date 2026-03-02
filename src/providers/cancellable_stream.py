@@ -7,11 +7,10 @@ Mixin para agregar soporte de cancelación a streams de providers
 Permite cancelar streams de manera segura y consistente
 """
 import asyncio
-from typing import AsyncGenerator, Any, Optional
 from abc import ABC, abstractmethod
+from typing import AsyncGenerator, Optional
 
 from src.utils.logger import get_logger
-
 
 logger = get_logger(__name__)
 
@@ -27,7 +26,7 @@ class CancellableStreamMixin(ABC):
         self,
         messages,
         model: str,
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         **kwargs
     ) -> AsyncGenerator[str, None]:
@@ -39,7 +38,7 @@ class CancellableStreamMixin(ABC):
         messages,
         model: str,
         cancel_event: asyncio.Event,
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         cancel_check_interval: float = 0.1,
         **kwargs

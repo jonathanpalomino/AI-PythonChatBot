@@ -12,9 +12,11 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 from tqdm import tqdm
 
 from src.config.settings import settings
-from src.services.embedding_service import EmbeddingService
 from .tracker import SyncTracker
 from ..document_loaders import DocumentLoaderFactory
+from ..services.embedding.embedding_service import EmbeddingService
+from ..services.analysis.codebase_analyzer import LANGUAGE_BY_EXTENSION
+from src.utils.date_utils import get_current_utc_iso
 
 
 class QdrantSyncer:
@@ -111,10 +113,10 @@ class QdrantSyncer:
         )
         print("âœ… ColecciÃ³n creada")
 
-    def generate_embedding(self, text: str) -> List[float]:
+    def generate_embedding(self, text: str, disable_truncation: bool = False) -> List[float]:
         """Genera embedding usando Ollama con manejo de textos largos"""
         embedding_service = EmbeddingService()
-        return embedding_service.generate_embedding_sync(text)
+        return embedding_service.generate_embedding_sync(text, disable_truncation=disable_truncation)
 
     def find_documents(self) -> List[Path]:
         """Encuentra todos los documentos soportados en el vault"""
@@ -231,48 +233,63 @@ class QdrantSyncer:
                     print(f"   ðŸ—‘ï¸  Eliminados {len(old_ids)} vectores antiguos")
 
             # Generar puntos para cada secciÃ³n (con chunking si es necesario)
+            # from datetime import datetime -> Removed local import
+            indexed_at = get_current_utc_iso()
+            
+            all_chunks_data = []
+            for section in doc.sections:
+                section_chunks = self._split_long_section(section, max_chars=2000)
+                for sc in section_chunks:
+                    all_chunks_data.append({
+                        'chunk': sc,
+                        'level': section.level
+                    })
+
             points = []
             point_ids = []
-            chunk_index = 0
+            total_chunks = len(all_chunks_data)
 
-            for section in doc.sections:
-                # Dividir secciÃ³n si es muy larga
-                chunks = self._split_long_section(section, max_chars=2000)
+            for chunk_index, chunk_data in enumerate(all_chunks_data):
+                chunk = chunk_data['chunk']
+                # Texto completo para embedding
+                text_to_embed = f"{chunk['title']}\n\n{chunk['content']}"
 
-                for chunk in chunks:
-                    # Texto completo para embedding
-                    text_to_embed = f"{chunk['title']}\n\n{chunk['content']}"
+                # Detectar si es código para deshabilitar truncamiento
+                # Use LANGUAGE_BY_EXTENSION from codebase_analyzer to avoid duplication
+                is_code = doc_path.suffix.lower() in LANGUAGE_BY_EXTENSION
+                
+                # Generar embedding
+                try:
+                    embedding = self.generate_embedding(text_to_embed, disable_truncation=is_code)
+                except Exception as e:
+                    print(f"   â Œ Error generando embedding: {e}")
+                    self.stats['errors'] += 1
+                    continue
 
-                    # Generar embedding
-                    try:
-                        embedding = self.generate_embedding(text_to_embed)
-                    except Exception as e:
-                        print(f"   âŒ Error generando embedding: {e}")
-                        self.stats['errors'] += 1
-                        continue
+                # ID Ãºnico
+                point_id = self._generate_point_id(rel_path, chunk_index)
+                point_ids.append(point_id)
 
-                    # ID Ãºnico
-                    point_id = self._generate_point_id(rel_path, chunk_index)
-                    point_ids.append(point_id)
-                    chunk_index += 1
+                # Preparar payload
+                payload = {
+                    'file': doc.file_name,
+                    'filePath': rel_path,
+                    'section': chunk['title'],
+                    'sectionLevel': chunk_data['level'],
+                    'content': chunk['content'],
+                    'fullText': text_to_embed,
+                    'chunk_index': chunk_index,
+                    'total_chunks': total_chunks,
+                    'indexed_at': indexed_at,
+                    **doc.metadata,
+                    **chunk['metadata']
+                }
 
-                    # Preparar payload
-                    payload = {
-                        'file': doc.file_name,
-                        'filePath': rel_path,
-                        'section': chunk['title'],
-                        'sectionLevel': section.level,
-                        'content': chunk['content'],
-                        'fullText': text_to_embed,
-                        **doc.metadata,
-                        **chunk['metadata']
-                    }
-
-                    points.append(PointStruct(
-                        id=point_id,
-                        vector=embedding,
-                        payload=payload
-                    ))
+                points.append(PointStruct(
+                    id=point_id,
+                    vector=embedding,
+                    payload=payload
+                ))
 
             # Insertar en Qdrant
             if points:

@@ -18,6 +18,8 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
+from src.utils.date_utils import get_current_utc
+
 
 # =============================================================================
 # Base Class
@@ -25,6 +27,25 @@ from sqlalchemy.sql import func
 
 class Base(DeclarativeBase):
     """Base class for all models"""
+    pass
+
+
+class CreatedAtMixin:
+    """Mixin for created_at timestamp"""
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=get_current_utc)
+
+
+class UpdatedAtMixin:
+    """Mixin for updated_at timestamp"""
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=get_current_utc,
+        onupdate=get_current_utc
+    )
+
+
+class TimestampMixin(CreatedAtMixin, UpdatedAtMixin):
+    """Mixin for both timestamps"""
     pass
 
 
@@ -87,6 +108,8 @@ class ToolType(str, enum.Enum):
     http_request = "http_request"
     sql_query = "sql_query"
     rag_search = "rag_search"
+    codebase_tool = "codebase_tool"
+    obsidian_vault_loader = "obsidian_vault_loader"
     custom = "custom"
     
     @classmethod
@@ -103,7 +126,7 @@ class ToolType(str, enum.Enum):
 # Models
 # =============================================================================
 
-class PromptTemplate(Base):
+class PromptTemplate(Base, TimestampMixin):
     """Prompt templates - predefined and custom"""
     __tablename__ = "prompt_templates"
 
@@ -151,7 +174,7 @@ class PromptTemplate(Base):
         return f"<PromptTemplate(name={self.name}, category={self.category})>"
 
 
-class QdrantCollection(Base):
+class QdrantCollection(Base, TimestampMixin):
     """Registry of Qdrant vector collections"""
     __tablename__ = "qdrant_collections"
 
@@ -186,7 +209,7 @@ class QdrantCollection(Base):
         return f"<QdrantCollection(name={self.name}, vectors={self.vector_count})>"
 
 
-class Conversation(Base):
+class Conversation(Base, TimestampMixin):
     """Chat conversations"""
     __tablename__ = "conversations"
 
@@ -251,7 +274,7 @@ class Conversation(Base):
         return f"<Conversation(id={self.id}, title={self.title[:30]})>"
 
 
-class Message(Base):
+class Message(Base, CreatedAtMixin):
     """Individual messages in conversations"""
     __tablename__ = "messages"
 
@@ -326,7 +349,7 @@ class File(Base):
     # Metadata: hash, extracted_text, language, embedding_ids, analysis_result, etc.
     extra_metadata: Mapped[Dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
 
-    uploaded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime, default=get_current_utc)
 
     # Relationships
     conversation: Mapped[Optional["Conversation"]] = relationship(back_populates="files")
@@ -344,7 +367,7 @@ class File(Base):
         return f"<File(name={self.file_name}, type={self.file_type})>"
 
 
-class ToolConfiguration(Base):
+class ToolConfiguration(Base, CreatedAtMixin):
     """Tool configurations per conversation"""
     __tablename__ = "tool_configurations"
 
@@ -385,7 +408,7 @@ class ToolConfiguration(Base):
         return f"<ToolConfiguration(tool={self.tool_name}, active={self.is_active})>"
 
 
-class ConversationMemory(Base):
+class ConversationMemory(Base, CreatedAtMixin):
     """Memory/summary storage for conversations"""
     __tablename__ = "conversation_memory"
 
@@ -410,7 +433,7 @@ class ConversationMemory(Base):
         return f"<ConversationMemory(conv_id={self.conversation_id}, tokens={self.token_count})>"
 
 
-class Project(Base):
+class Project(Base, TimestampMixin):
     """
     Project entity to group files and conversations.
     Files uploaded to a project are indexed in a shared collection.
@@ -444,7 +467,7 @@ class Project(Base):
         return f"<Project(name={self.name})>"
 
 
-class CustomTool(Base):
+class CustomTool(Base, TimestampMixin):
     """Custom tools created by users"""
     __tablename__ = "custom_tools"
     
@@ -478,6 +501,10 @@ class CustomTool(Base):
     
     # Example configuration
     example: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, default=None)
+    
+    # Custom content prompt for LLM context interpretation
+    # This allows each tool to define how its results should be presented
+    content_prompt: Mapped[Optional[str]] = mapped_column(Text, default=None)
     
     # Visibility control (public, private, shared)
     visibility: Mapped[VisibilityType] = mapped_column(

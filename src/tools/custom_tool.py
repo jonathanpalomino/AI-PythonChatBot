@@ -6,16 +6,14 @@
 Tool para ejecutar herramientas personalizadas definidas por el usuario
 """
 
-from typing import List, Dict, Any, Optional, get_type_hints
 import inspect
 import re
+from typing import List, Dict, Any, Optional, get_type_hints
 from uuid import UUID
 
-import httpx
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from src.config.settings import settings
 from src.models.models import CustomTool
+from src.repositories.custom_tool_repository import CustomToolRepository
+from src.repositories.file_repository import FileRepository
 from src.tools.base_tool import BaseTool, ToolCategory, ToolParameter, ToolResult
 from src.utils.logger import get_logger
 
@@ -23,34 +21,39 @@ from src.utils.logger import get_logger
 class  CustomToolExecutor(BaseTool):
     """Tool para ejecutar herramientas personalizadas"""
 
-    def __init__(self, custom_tool_id: UUID, db: Optional[AsyncSession] = None):
+    def __init__(
+        self,
+        custom_tool_id: UUID,
+        file_repo: Optional[FileRepository] = None,
+        custom_tool_repo: Optional[CustomToolRepository] = None
+    ):
         self.custom_tool_id = custom_tool_id
-        self.db = db
+        self.file_repo = file_repo
+        self.custom_tool_repo = custom_tool_repo
         self.logger = get_logger(__name__)
         self._custom_tool_config = None
-        
+
         # Importar sistema de descubrimiento de herramientas
         from src.tools.tool_discovery import tool_discovery
-        
+
         # Asegurarse de que las herramientas estén descubiertas
         if not tool_discovery.get_discovered_tools():
             tool_discovery.discover_tools()
-            
+
         super().__init__()
 
+    # Disable automatic discovery for this tool
+    auto_discover = False
+
     async def _load_custom_tool_config(self) -> CustomTool:
-        """Cargar la configuración de la herramienta personalizada desde la base de datos"""
+        """Cargar la configuración de la herramienta personalizada desde el repositorio"""
         if self._custom_tool_config:
             return self._custom_tool_config
 
-        if not self.db:
-            raise ValueError("Database session is required to load custom tool configuration")
+        if not self.custom_tool_repo:
+            raise ValueError("CustomToolRepository is required to load custom tool configuration")
 
-        from sqlalchemy import select
-        result = await self.db.execute(
-            select(CustomTool).filter(CustomTool.id == self.custom_tool_id)
-        )
-        custom_tool = result.scalars().first()
+        custom_tool = await self.custom_tool_repo.get_by_id(self.custom_tool_id)
 
         if not custom_tool:
             raise ValueError(f"Custom tool with id {self.custom_tool_id} not found")
@@ -77,6 +80,13 @@ class  CustomToolExecutor(BaseTool):
         return "unknown"
 
     @property
+    def content_prompt(self) -> Optional[str]:
+        """Obtener el prompt personalizado para el contexto de resultados"""
+        if self._custom_tool_config:
+            return self._custom_tool_config.content_prompt
+        return None
+
+    @property
     def description(self) -> str:
         config = self._custom_tool_config
         if config:
@@ -87,7 +97,7 @@ class  CustomToolExecutor(BaseTool):
     def category(self) -> ToolCategory:
         # Default category
         default_cat = ToolCategory.UTILITY
-        
+
         # Try to determine from configuration if loaded
         if self._custom_tool_config:
             tool_type = self._custom_tool_config.tool_type
@@ -97,7 +107,7 @@ class  CustomToolExecutor(BaseTool):
                 return ToolCategory.WEB
             elif tool_type == "sql_query":
                 return ToolCategory.UTILITY
-        
+
         return default_cat
 
     def get_parameters(self) -> List[ToolParameter]:
@@ -108,7 +118,7 @@ class  CustomToolExecutor(BaseTool):
         parameters = []
         # Use configuration field instead of parameters
         config = self._custom_tool_config.configuration or {}
-        
+
         # Extract parameters from configuration if available
         if "parameters" in config:
             for param in config["parameters"]:
@@ -122,23 +132,23 @@ class  CustomToolExecutor(BaseTool):
                         enum=param.get("enum")
                     )
                 )
-        
-        
+
+
         # 2. Add automatically discovered parameters from templates if they aren't explicitly defined
         explicit_names = {p.name for p in parameters}
         discovered_names = self._find_template_tags(config)
-        
+
         for name in discovered_names:
             if name not in explicit_names:
                 parameters.append(
                     ToolParameter(
                         name=name,
                         type="string",
-                        description=f"Parameter detected in tool configuration: {name}",
-                        required=True
+                        description=f"Valor para completar la variable '{{{{{name}}}}}' en la configuración de la herramienta.",
+                        required=True # Si es un tag autodetectado, suele ser necesario para que el tool funcione
                     )
                 )
-        
+
         return parameters
 
     def _find_template_tags(self, obj: Any) -> set:
@@ -193,30 +203,29 @@ class  CustomToolExecutor(BaseTool):
         try:
             # Obtener la herramienta física desde el registro de herramientas o descubrimiento automático
             physical_tool = self._get_physical_tool_from_registry(config.tool_type)
-            
+
             if physical_tool is None:
                 return ToolResult(
                     success=False,
                     data=None,
                     error=f"Unsupported tool type: {config.tool_type}"
                 )
-            
+
             # Crear una nueva instancia para evitar problemas de estado compartido
             physical_tool_class = physical_tool.__class__
             physical_tool = physical_tool_class()
             class_name = physical_tool_class.__name__
-            
+
             # Obtener la configuración de la herramienta
             tool_config = config.configuration or {}
-            
+
             # Interpolate variables in the configuration using kwargs (LLM provided params)
             interpolated_config = self._interpolate_value(tool_config, kwargs)
-            
+
             # Combinar configuración interpolada con parámetros de entrada
-            # La configuración interpolada tiene PRECEDENCIA sobre kwargs para evitar que
-            # alias o parámetros accidentales sobreescriban la URL u otros campos críticos del template.
-            execution_params = {**kwargs, **interpolated_config}
-            
+            # PRIORIDAD: kwargs (parámetros de ejecución/conversación) sobreescriben la configuración del template.
+            execution_params = {**interpolated_config, **kwargs}
+
             # Validar que la herramienta física tenga el método execute
             if not hasattr(physical_tool, 'execute'):
                 return ToolResult(
@@ -224,20 +233,35 @@ class  CustomToolExecutor(BaseTool):
                     data=None,
                     error=f"Physical tool {class_name} does not have execute method"
                 )
-            
+
+            # Validar que no queden placeholders {{tag}} sin reemplazar en parámetros críticos
+            # (especialmente en la URL para herramientas HTTP)
+            self._validate_placeholders(execution_params)
+
             # Filtrar parámetros para que solo se pasen los que la herramienta física acepta
             filtered_params = self._filter_valid_parameters(
                 physical_tool.execute,
                 execution_params
             )
             
+            # NUEVO: Log para debug de filters
+            if "filters" in execution_params:
+                self.logger.info(
+                    f"Custom tool '{config.name}' - filters in execution_params: {execution_params['filters']}"
+                )
+                if "filters" not in filtered_params:
+                    self.logger.warning(
+                        f"Custom tool '{config.name}' - filters was FILTERED OUT! Adding back..."
+                    )
+                    filtered_params["filters"] = execution_params["filters"]
+
             # Ejecutar la herramienta física con los parámetros filtrados
             self.logger.debug(f"Ejecutando {class_name} con parámetros: {list(filtered_params.keys())}")
             if "collections" in filtered_params:
                 self.logger.info(f"Custom tool '{config.name}' usando colecciones: {filtered_params['collections']}")
-                
+
             result = await physical_tool.execute(**filtered_params)
-            
+
             # Registrar resultado
             if result.success:
                 self.logger.info(
@@ -260,9 +284,9 @@ class  CustomToolExecutor(BaseTool):
                         "error": result.error
                     }
                 )
-            
+
             return result
-            
+
         except Exception as e:
             self.logger.error(
                 f"Physical tool execution error: {e}",
@@ -281,13 +305,13 @@ class  CustomToolExecutor(BaseTool):
     def _resolve_parameter_aliases(self, config: CustomTool, kwargs: Dict[str, Any]) -> None:
         """
         Attempt to resolve missing template variables from other provided parameters.
-        支持双向映射 (Bidirectional Mapping):
+        Bidirectional Mapping:
         1. Si se provee la llave (k) pero falta el tag ({{tag}}): tag = k
         2. Si se provee el tag ({{tag}}) pero falta la llave (k): k = tag
         """
         tool_config = config.configuration or {}
         self.logger.debug(f"Attempting bidirectional parameter resolution for {self.name}...")
-        
+
         # Scan recursively for mappings in the config
         def find_mappings(obj):
             mappings = {}
@@ -300,18 +324,18 @@ class  CustomToolExecutor(BaseTool):
                         # para evitar ambigüedades en strings complejos como "/api/{{v1}}/{{v2}}"
                         if len(matches) == 1 and v.strip() == f"{{{{{matches[0].strip()}}}}}":
                             tag = matches[0].strip()
-                            
+
                             # Logica Bidireccional:
                             # 1. Caso 'nombre_ciudad' -> '{{nom_ciudad}}'
                             # LLM extrajo el nombre de la llave técnica, llenamos la variable
                             if k in kwargs and tag not in kwargs:
                                 mappings[tag] = kwargs[k]
-                                
+
                             # 2. Caso 'll_param_idx' <- '{{nom_ciudad}}' (Stress Test)
                             # LLM extrajo el tag semántico, llenamos la llave técnica esperada por el endpoint
                             elif tag in kwargs and k not in kwargs:
                                 mappings[k] = kwargs[tag]
-                                
+
                     # Recurse into nested structures
                     mappings.update(find_mappings(v))
             elif isinstance(obj, list):
@@ -352,12 +376,12 @@ class  CustomToolExecutor(BaseTool):
         """
         from src.tools.base_tool import tool_registry
         from src.tools.tool_discovery import tool_discovery
-        
+
         # Primero intentar desde el registro de herramientas
         physical_tool = tool_registry.get(tool_type)
         if physical_tool:
             return physical_tool
-        
+
         # Si no está en el registro, intentar desde el sistema de descubrimiento
         tool_class = tool_discovery.get_tool_class(tool_type)
         if tool_class:
@@ -367,20 +391,20 @@ class  CustomToolExecutor(BaseTool):
                 return instance
             except Exception as e:
                 self.logger.warning(f"Failed to instantiate discovered tool {tool_type}: {e}")
-        
+
         # Si no se encuentra, intentar mapeo de legacy (para compatibilidad)
         legacy_mapping = {
             "http_request": "http_request",
             "sql_query": "sql_query",
             "rag_search": "rag_search"
         }
-        
+
         if tool_type in legacy_mapping:
             mapped_name = legacy_mapping[tool_type]
             physical_tool = tool_registry.get(mapped_name)
             if physical_tool:
                 return physical_tool
-        
+
         return None
 
     def _filter_valid_parameters(self, method, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -389,15 +413,15 @@ class  CustomToolExecutor(BaseTool):
             # Get the signature of the method
             sig = inspect.signature(method)
             type_hints = get_type_hints(method)
-            
+
             # Get all parameter names from the method signature
             valid_params = {}
             for param_name, param_value in params.items():
                 if param_name in sig.parameters:
                     valid_params[param_name] = param_value
-            
+
             return valid_params
-            
+
         except Exception as e:
             # If there's an error in filtering, log it but return all params
             self.logger.warning(
@@ -411,19 +435,42 @@ class  CustomToolExecutor(BaseTool):
         try:
             from urllib.parse import urlparse
             parsed = urlparse(url)
-            
+
             # Validar que tenga esquema y dominio
             if not parsed.scheme or not parsed.netloc:
                 return False
-            
+
             # Validar que el esquema sea HTTP o HTTPS
             if parsed.scheme not in ["http", "https"]:
                 return False
-            
+
             # Validar que no sea una URL local o privada
             if parsed.netloc.startswith("localhost") or parsed.netloc.startswith("127.0.0.1"):
                 return False
-            
+
             return True
         except Exception:
             return False
+
+    def _validate_placeholders(self, params: Dict[str, Any]) -> None:
+        """
+        Verifica si quedan placeholders {{tag}} sin reemplazar en los parámetros.
+        Lanza ValueError si encuentra placeholders en strings.
+        """
+        for key, value in params.items():
+            if isinstance(value, str) and "{{" in value and "}}" in value:
+                # Encontrar qué tags faltan
+                missing = re.findall(r'\{\{([^}]+)\}\}', value)
+                if missing:
+                    self.logger.error(f"Execution blocked: Missing values for template variables: {missing}")
+                    raise ValueError(f"Faltan parámetros requeridos por la herramienta: {', '.join(missing)}")
+            elif isinstance(value, dict):
+                self._validate_placeholders(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, (dict, list)):
+                        self._validate_placeholders({"item": item}) # Nested check
+                    elif isinstance(item, str) and "{{" in item and "}}" in item:
+                        missing = re.findall(r'\{\{([^}]+)\}\}', item)
+                        if missing:
+                            raise ValueError(f"Faltan parámetros requeridos en lista: {', '.join(missing)}")
