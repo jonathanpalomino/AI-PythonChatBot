@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 
-import redis
+import redis.asyncio as redis
 from ollama import AsyncClient as OllamaClient
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
@@ -354,7 +354,7 @@ class FileProcessor:
         self.ollama = OllamaClient(host=settings.OLLAMA_BASE_URL)
         # Initialize Redis client for progress tracking
         try:
-            self.redis_client = redis.Redis.from_url(settings.REDIS_URL)
+            self.redis_client = redis.from_url(settings.REDIS_URL)
         except Exception as e:
             self.logger.warning(f"Failed to initialize Redis client: {e}")
             self.redis_client = None
@@ -410,7 +410,7 @@ class FileProcessor:
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}", exc_info=True)
 
-    def _set_progress(self, file_id: UUID, progress: int):
+    async def _set_progress(self, file_id: UUID, progress: int):
         """
         Set file processing progress in Redis with TTL.
 
@@ -421,7 +421,7 @@ class FileProcessor:
 
         try:
             # Use setex to set value with expiration (atomic operation)
-            self.redis_client.setex(
+            await self.redis_client.setex(
                 name=f"processing:{file_id}",
                 time=3600,  # 1 hour TTL
                 value=progress
@@ -453,7 +453,6 @@ class FileProcessor:
             self.logger.info(f"Deleting chunks for file {file_id} from collection {collection_name}")
 
             # Delete points where file_id matches
-            # Qdrant filter based on payload
             from qdrant_client.models import Filter, FieldCondition, MatchValue
 
             await self.qdrant.delete(
@@ -468,11 +467,57 @@ class FileProcessor:
                 )
             )
 
+            # Also try to delete by filename as a safety measure for admin ingestion updates
+            await self.delete_points_by_filename(collection_name, file_record.file_name)
+
             self.logger.info(f"Successfully deleted chunks for file {file_id}")
             return True
 
         except Exception as e:
             self.logger.error(f"Failed to delete file chunks: {e}", exc_info=True)
+            return False
+
+    async def delete_points_by_filename(self, collection_name: str, file_name: str) -> bool:
+        """
+        Delete all points in a collection that match a specific filename.
+        Useful for replacing documents during admin ingestion.
+        Supports matching by basename, full path, or common metadata fields like doc_title.
+        """
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            
+            # Check if collection exists
+            try:
+                await self.qdrant.get_collection(collection_name)
+            except Exception:
+                return True
+
+            file_stem = Path(file_name).stem
+            self.logger.info(f"Aggressively cleaning points for '{file_name}' / '{file_stem}' in '{collection_name}'")
+            
+            # Use a 'should' (OR) filter to catch various ways a file might be identified
+            await self.qdrant.delete(
+                collection_name=collection_name,
+                points_selector=Filter(
+                    should=[
+                        # Exact filename match (API standard)
+                        FieldCondition(key="file", match=MatchValue(value=file_name)),
+                        # Match by stem (Common in scripts as doc_title or source_note)
+                        FieldCondition(key="doc_title", match=MatchValue(value=file_stem)),
+                        FieldCondition(key="source_note", match=MatchValue(value=file_stem)),
+                        # Match by title if it matches basename
+                        FieldCondition(key="title", match=MatchValue(value=file_stem))
+                    ]
+                )
+            )
+
+            # Safety: Also try to delete if 'file' field *contains* the filename (for full paths)
+            # MatchText is only for text-indexed fields, but for deletion we can try a regex if needed
+            # For now, matching by doc_title and source_note should cover most script-generated points
+            
+            return True
+        except Exception as e:
+            self.logger.warning(f"Failed to delete points by filename {file_name}: {e}")
             return False
 
     def _generate_point_id(self, file_id: UUID, section_index: int) -> str:
@@ -784,6 +829,10 @@ class FileProcessor:
 
     async def _get_collection_name(self, file_record: FileModel) -> str:
         """Determine the collection name for a file"""
+        # 🆕 ADMIN INGEST OVERRIDE
+        if file_record.extra_metadata and file_record.extra_metadata.get("collection_name"):
+            return file_record.extra_metadata["collection_name"]
+
         # If file is associated with a project (PRIORITY)
         if file_record.project_id:
             return f"project_{file_record.project_id}"
@@ -808,6 +857,10 @@ class FileProcessor:
 
     async def _get_embedding_model(self, file_record: FileModel) -> Optional[str]:
         """Get embedding model from conversation settings if available"""
+        # 🆕 ADMIN INGEST OVERRIDE
+        if file_record.extra_metadata and file_record.extra_metadata.get("embedding_model_override"):
+            return file_record.extra_metadata["embedding_model_override"]
+
         if file_record.conversation_id:
             conversation = await self.conversation_repo.get_by_id(file_record.conversation_id)
             if conversation and conversation.settings:
@@ -1114,6 +1167,13 @@ class FileProcessor:
             set_conversation_context(str(file_record.conversation_id))
 
         try:
+            # Determine collection early to check for existing chunks
+            collection_name = await self._get_collection_name(file_record)
+            
+            # CLEANUP: Delete old chunks for this file if it's an update or re-processing
+            # This prevents duplicates in Qdrant
+            await self.delete_file_chunks(file_id)
+
             self.logger.info(
                 "Processing file",
                 extra={
@@ -1123,7 +1183,8 @@ class FileProcessor:
                     "concurrency": CONCURRENCY_LIMIT,
                     "file_type": file_record.file_type,
                     "conversation_id": str(file_record.conversation_id)
-                    if file_record.conversation_id else None
+                    if file_record.conversation_id else None,
+                    "collection": collection_name
                 }
             )
 
@@ -1192,8 +1253,7 @@ class FileProcessor:
             if embedding_model_name:
                 self.logger.info(f"Using conversation embedding model: {embedding_model_name}")
 
-            # Determine collection
-            collection_name = await self._get_collection_name(file_record)
+            # Ensure collection exists (already determined collection_name above)
             await self._ensure_collection_exists(collection_name, model=embedding_model_name)
             # =====================================================================
             # PREPARE CHUNKS FOR PARALLEL PROCESSING
@@ -1380,7 +1440,7 @@ class FileProcessor:
                 # Update progress
                 if self.redis_client:
                     progress = int((len(all_embeddings) / total_chunks) * 50)  # 0-50%
-                    self._set_progress(file_id, progress)  # BUG #7 FIX
+                    await self._set_progress(file_id, progress)  # BUG #7 FIX
 
                 self.logger.info(
                     f"Embedded batch {i // EMBED_BATCH_SIZE + 1}/{(total_chunks + EMBED_BATCH_SIZE - 1) // EMBED_BATCH_SIZE}"
@@ -1506,7 +1566,7 @@ class FileProcessor:
                                  p == point or valid_points.index(p) < valid_points.index(point)])
                 progress = 50 + int((processed / len(valid_points)) * 50)  # 50-100%
                 # Use a specific key for processing progress
-                self._set_progress(file_id, progress)  # BUG #7 FIX
+                await self._set_progress(file_id, progress)  # BUG #7 FIX
                 # Also ensure the main file status key reflects 'processing' or 100 if we want to track it there
                 # But for now, let's keep it separate to avoid overwriting upload progress if they are same key
 

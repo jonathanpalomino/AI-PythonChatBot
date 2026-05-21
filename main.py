@@ -5,6 +5,18 @@
 """
 RAG Chatbot API - Main application
 """
+import sys
+import asyncio
+
+# ---------------------------------------------------------------------------
+# Windows: Playwright (and any code using create_subprocess_exec) requires
+# ProactorEventLoop. The default SelectorEventLoop in Python 3.8+ on Windows
+# raises NotImplementedError for subprocess creation.
+# Must be set BEFORE uvicorn / any asyncio code is imported.
+# ---------------------------------------------------------------------------
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 import atexit
 import platform
 import subprocess
@@ -24,13 +36,15 @@ from src.tools.http_tool import HTTPTool
 from src.tools.obsidian_note_tool import ObsidianNoteTool  # New: Obsidian vault loader
 from src.tools.rag_tool import RAGTool
 from src.tools.sql_tool import SQLTool
+from src.tools.git_tool import GitTool
 from src.utils.health_checker import HealthChecker
 from src.utils.logger import get_logger
+from src.api.v1 import auth as auth_router
 
 logger = get_logger(__name__)
 
 # Import routers
-from src.api.v1 import conversations, messages, prompts, files, collections, tools, projects
+from src.api.v1 import conversations, messages, prompts, files, collections, tools, projects, collections_ingest, oauth_router
 
 # Global variable to hold Qdrant process
 qdrant_process = None
@@ -663,6 +677,20 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info("Database initialized")
 
+    # ---------------------------------------------------------------------------
+    # [Módulo C] Bootstrap Auth: roles y permisos del sistema (idempotente)
+    # ---------------------------------------------------------------------------
+    from src.utils.service_factory import get_permission_service
+    try:
+        async with get_permission_service() as perm_svc:
+            auth_result = await perm_svc.bootstrap_system_roles()
+            print(f"✅ Auth bootstrap: {auth_result['roles_created']} roles, "
+                  f"{auth_result['permissions_created']} permissions created")
+    except Exception as e:
+        logger.error(f"Auth bootstrap failed: {e}", exc_info=True)
+        print(f"❌ Auth bootstrap failed: {e}")
+    # ---------------------------------------------------------------------------
+
     # Import service factory for tool operations
     from src.utils.service_factory import get_tool_service, get_session_for_provider_sync
 
@@ -672,6 +700,7 @@ async def lifespan(app: FastAPI):
     sql_tool = SQLTool()
     codebase_tool = CodebaseTool()
     obsidian_tool = ObsidianNoteTool()
+    git_tool = GitTool()
 
     # Register physical tool instances (solo una vez)
     tool_registry.register(rag_tool)
@@ -679,13 +708,14 @@ async def lifespan(app: FastAPI):
     tool_registry.register(sql_tool)
     tool_registry.register(codebase_tool)
     tool_registry.register(obsidian_tool)
+    tool_registry.register(git_tool)
 
     logger.info(f"Physical tools registered: {len(tool_registry.list_names())}")
     print(f"✅ {len(tool_registry.list_names())} physical tools registered")
 
     # Sync tool templates to database using ToolService
     await sync_tool_templates(
-        tools_to_sync=[rag_tool, http_tool, sql_tool, codebase_tool, obsidian_tool]
+        tools_to_sync=[rag_tool, http_tool, sql_tool, codebase_tool, obsidian_tool, git_tool]
     )
 
     # Initialize tool types from database
@@ -717,6 +747,23 @@ async def lifespan(app: FastAPI):
                         )
                         custom_tool_executor._name = custom_tool.name
                         tool_registry.register(custom_tool_executor)
+
+                        # Registrar en IntentRouter dinámicamente
+                        if custom_tool.intent_examples or (custom_tool.configuration and "intent_actions" in custom_tool.configuration):
+                            from src.services.intent.router import get_intent_router
+                            router = await get_intent_router()
+
+                            # Verificar si tiene intent_actions configurados (sistema multi-action)
+                            intent_actions = None
+                            if custom_tool.configuration and "intent_actions" in custom_tool.configuration:
+                                intent_actions = custom_tool.configuration["intent_actions"]
+
+                            await router.register_custom_tool(
+                                tool_name=custom_tool.name,
+                                examples=custom_tool.intent_examples,  # Para compatibilidad
+                                tool_type=str(custom_tool.tool_type),
+                                intent_actions=intent_actions
+                            )
 
                         logger.info(
                             f"Custom tool registered: {custom_tool.name} (ID: {custom_tool.id})")
@@ -755,7 +802,22 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    await close_db_connections()
+    try:
+        from src.providers.manager import provider_manager, ProviderType
+        web_emulator = provider_manager.providers.get(ProviderType.WEB_EMULATOR)
+        if web_emulator and hasattr(web_emulator, 'close'):
+            import asyncio
+            if asyncio.iscoroutinefunction(web_emulator.close):
+                await web_emulator.close()
+            else:
+                web_emulator.close()
+            logger.info("Web Emulator provider closed (browser tabs preserved)")
+    except Exception as e:
+        logger.error(f"Error closing Web Emulator provider: {e}")
+
+    close_db_connections()
+    from src.database.connection import close_async_db_connections
+    await close_async_db_connections()
     stop_qdrant()
     stop_redis()
     stop_celery()
@@ -898,6 +960,24 @@ app.include_router(
     tags=["Projects"]
 )
 
+app.include_router(
+    collections_ingest.router,
+    prefix=f"{settings.API_PREFIX}/collections",
+    tags=["Files Collections"]
+)
+
+# [Módulo C] Auth router
+app.include_router(
+    auth_router.router,
+    prefix=f"{settings.API_PREFIX}/auth",
+    tags=["Authentication"]
+)
+
+app.include_router(
+    oauth_router.router,
+    prefix=f"{settings.API_PREFIX}/oauth",
+    tags=["OAuth"]
+)
 
 # =============================================================================
 # Additional utility endpoints
@@ -955,10 +1035,28 @@ async def list_providers():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8001,
-        reload=settings.DEBUG,
-        log_level=settings.LOG_LEVEL.lower()
-    )
+    if sys.platform == "win32":
+        # On Windows, uvicorn with reload=True explicitly overrides the event loop
+        # policy to WindowsSelectorEventLoopPolicy, which breaks Playwright's
+        # subprocess creation (create_subprocess_exec → NotImplementedError).
+        # Fix: run uvicorn.Server directly inside an explicit ProactorEventLoop.
+        # Hot-reload is disabled on Windows; restart manually after code changes.
+        config = uvicorn.Config(
+            "main:app",
+            host="0.0.0.0",
+            port=8001,
+            reload=False,          # reload=True forces SelectorEventLoop on Windows
+            log_level=settings.LOG_LEVEL.lower(),
+        )
+        server = uvicorn.Server(config)
+        loop = asyncio.ProactorEventLoop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(server.serve())
+    else:
+        uvicorn.run(
+            "main:app",
+            host="0.0.0.0",
+            port=8001,
+            reload=settings.DEBUG,
+            log_level=settings.LOG_LEVEL.lower(),
+        )

@@ -492,11 +492,19 @@ class ContextBuilder:
             return False
 
     def _format_rag_context(self, rag_data: Dict) -> str:
-        """Format RAG search results into context."""
+        """Format RAG search results into context with proper header."""
+        from src.config.prompts import SystemPrompts
+        
         chunks = rag_data.get("chunks", [])
 
         if not chunks:
             return ""
+
+        # Get collection info from metadata
+        collections = rag_data.get("metadata", {}).get("collections_searched", [])
+        collection_info = ""
+        if collections:
+            collection_info = f"Colecciones consultadas: {', '.join(collections)}\n"
 
         # ── Anti-Hallucination: Detectar si los chunks contienen código fuente ──
         # El patrón y el mensaje están centralizados en SystemPrompts (prompts.py).
@@ -505,7 +513,10 @@ class ContextBuilder:
         _sample = " ".join(c.get('content', '') for c in chunks[:5])
         _has_code = bool(_code_pattern.search(_sample))
 
-        context = "## Relevant Documentation\n\n"
+        # Use RAG-specific header with collection info
+        context = SystemPrompts.SOURCE_OF_TRUTH_RAG
+        if collection_info:
+            context = SystemPrompts.SOURCE_OF_TRUTH_RAG + collection_info + "\n"
 
         if _has_code:
             context += SystemPrompts.CODE_ANTI_HALLUCINATION_INSTRUCTION
@@ -540,6 +551,17 @@ class ContextBuilder:
             return custom_tools
         except Exception as e:
             self.logger.error(f"Error fetching custom RAG tools: {e}")
+            return []
+
+    async def _get_custom_tools_by_name(self, tool_name: str) -> List[Any]:
+        """Get active custom tools by name."""
+        if not self.custom_tool_repo:
+            return []
+        try:
+            custom_tool = await self.custom_tool_repo.get_by_name(None, tool_name)  # conversation_id=None for global
+            return [custom_tool] if custom_tool else []
+        except Exception as e:
+            self.logger.error(f"Error fetching custom tool by name '{tool_name}': {e}")
             return []
 
     async def _execute_custom_rag_tool(

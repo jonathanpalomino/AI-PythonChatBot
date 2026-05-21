@@ -140,6 +140,34 @@ class QdrantCollectionResponse(BaseSchema):
 
 
 # =============================================================================
+# Ingestion Schemas
+# =============================================================================
+
+class FolderIngestRequest(BaseModel):
+    """Request to ingest a local folder into a collection"""
+    folder_path: str = Field(..., description="Absolute path to the folder on the server")
+    recursive: bool = Field(True, description="Whether to scan subfolders")
+    embedding_model: Optional[str] = Field(None, description="Optional override for embedding model")
+
+
+class IngestionErrorDetail(BaseModel):
+    """Specific error details for an ingestion failure"""
+    file: str
+    error: str
+
+
+class IngestionStats(BaseModel):
+    """Statistics for an ingestion process"""
+    total_found: int
+    processed: int
+    added: int
+    updated: int
+    skipped: int
+    errors: int
+    error_details: List[IngestionErrorDetail] = []
+
+
+# =============================================================================
 # Project Schemas
 # =============================================================================
 
@@ -427,6 +455,8 @@ class CustomToolCreate(BaseModel):
     description: Optional[str] = None
     tool_type: ToolType = Field(default=ToolType.http_request)
     configuration: Dict[str, Any] = Field(default_factory=dict)
+    intent_examples: List[str] = Field(default_factory=list)
+    content_prompt: Optional[str] = None
     visibility: VisibilityType = VisibilityType.PUBLIC
     is_active: bool = True
 
@@ -437,6 +467,8 @@ class CustomToolUpdate(BaseModel):
     description: Optional[str] = None
     tool_type: Optional[ToolType] = None
     configuration: Optional[Dict[str, Any]] = None
+    intent_examples: Optional[List[str]] = None
+    content_prompt: Optional[str] = None
     visibility: Optional[VisibilityType] = None
     is_active: Optional[bool] = None
 
@@ -448,6 +480,8 @@ class CustomToolResponse(BaseSchema):
     description: Optional[str]
     tool_type: ToolType
     configuration: Dict[str, Any]
+    intent_examples: List[str]
+    content_prompt: Optional[str] = None
     visibility: VisibilityType
     is_active: bool
     created_at: datetime
@@ -509,3 +543,54 @@ class ErrorResponse(BaseModel):
     error: str
     detail: Optional[str] = None
     code: Optional[str] = None
+
+
+# =============================================================================
+# Tool Execution Plan (para integración con IntentRouter)
+# =============================================================================
+
+
+class ToolScoreInfo(BaseModel):
+    """Información de score de una tool desde IntentRouter"""
+    tool_name: str
+    score: float
+    best_intent: str
+    best_intent_action: Optional[str] = None
+    passes_threshold: bool
+    requires_target: bool
+    target: Optional[str] = None
+    default_params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolExecutionPlan(BaseModel):
+    """
+    Plan de ejecución de tools basado en IntentRouter.
+    
+    Este es el resultado de la fase de planificación donde se decide
+    QUÉ tools ejecutar y EN QUÉ orden, ANTES de ejecutar cualquiera.
+    
+    Esto resuelve el problema de ejecutar RAG siempre cuando no es necesario.
+    """
+    # Tools a ejecutar en orden de prioridad (ordenado por score)
+    tools_to_execute: List[str] = Field(default_factory=list)
+    
+    # Scores completos de todas las tools evaluadas
+    tool_scores: Dict[str, ToolScoreInfo] = Field(default_factory=dict)
+    
+    # Indica si RAG es necesario según el plan
+    needs_rag: bool = False
+    
+    # Razón por la que se necesita/necesita RAG
+    rag_reason: Optional[str] = None
+    
+    # Archivo objetivo detectado
+    target_file_id: Optional[UUID] = None
+    
+    # Contexto adicional para la ejecución
+    execution_context: Dict[str, Any] = Field(default_factory=dict)
+    
+    # Indica si hay tools que pasaron el threshold
+    has_valid_tools: bool = False
+    
+    # Mensaje de logging/debug
+    debug_message: Optional[str] = None

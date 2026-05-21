@@ -3,7 +3,7 @@
 # SQL Query Tool
 # =============================================================================
 """
-Tool for executing SQL queries against supported databases (PostgreSQL, MySQL, Oracle)
+Herramienta para ejecutar consultas SQL en bases de datos soportadas (Postgres, MySQL, Oracle).
 """
 
 from typing import List, Dict, Any, Optional
@@ -18,15 +18,13 @@ from src.utils.logger import get_logger
 
 
 class SQLTool(BaseTool):
-    """Tool for executing SQL queries against databases"""
+    """Herramienta para ejecutar consultas SQL en bases de datos."""
 
     def __init__(self):
         self.logger = get_logger(__name__)
         super().__init__()
 
-    # =============================================================================
-    # Tool Definition
-    # =============================================================================
+    # Definición de la Herramienta
 
     @property
     def name(self) -> str:
@@ -34,7 +32,7 @@ class SQLTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Execute SQL queries against configured databases (PostgreSQL, MySQL, Oracle)"
+        return "Ejecuta consultas SQL en bases de datos configuradas (PostgreSQL, MySQL, Oracle)."
 
     @property
     def category(self) -> ToolCategory:
@@ -49,7 +47,7 @@ class SQLTool(BaseTool):
             ToolParameter(
                 name="database_type",
                 type="string",
-                description="Type of database: 'postgresql', 'mysql', or 'oracle'",
+                description="Tipo de base de datos: 'postgresql', 'mysql', o 'oracle'.",
                 required=True,
                 enum=["postgresql", "mysql", "oracle"],
                 example="postgresql"
@@ -57,14 +55,14 @@ class SQLTool(BaseTool):
             ToolParameter(
                 name="host",
                 type="string",
-                description="Database host or socket path",
+                description="Host de la base de datos o ruta del socket.",
                 required=True,
                 example="localhost"
             ),
             ToolParameter(
                 name="port",
                 type="integer",
-                description="Database port (default: 5432 for PostgreSQL, 3306 for MySQL)",
+                description="Puerto de la base de datos (por defecto: 5432 para PostgreSQL, 3306 para MySQL).",
                 required=False,
                 default=None,
                 example=5432
@@ -72,35 +70,35 @@ class SQLTool(BaseTool):
             ToolParameter(
                 name="database",
                 type="string",
-                description="Database name",
+                description="Nombre de la base de datos.",
                 required=True,
                 example="mydatabase"
             ),
             ToolParameter(
                 name="username",
                 type="string",
-                description="Database username",
+                description="Nombre de usuario.",
                 required=True,
                 example="dbuser"
             ),
             ToolParameter(
                 name="password",
                 type="string",
-                description="Database password",
+                description="Contraseña de la base de datos.",
                 required=True,
                 example="dbpassword"
             ),
             ToolParameter(
                 name="query",
                 type="string",
-                description="SQL query to execute",
+                description="Consulta SQL a ejecutar.",
                 required=True,
                 example="SELECT * FROM customers WHERE active = True LIMIT 100"
             ),
             ToolParameter(
                 name="parameters",
                 type="object",
-                description="Optional query parameters (for parameterized queries)",
+                description="Parámetros opcionales para la consulta.",
                 required=False,
                 default={},
                 example={"status": "active", "limit": 100}
@@ -108,19 +106,17 @@ class SQLTool(BaseTool):
             ToolParameter(
                 name="fetch_size",
                 type="integer",
-                description="Maximum number of rows to fetch (default: 100)",
+                description="Número máximo de filas a recuperar (por defecto: 100).",
                 required=False,
                 default=100,
                 example=100
             )
         ]
 
-    # =============================================================================
-    # Helper Methods
-    # =============================================================================
+    # Métodos Auxiliares
 
     def _get_default_port(self, database_type: str) -> int:
-        """Get default port for database type"""
+        """Obtiene el puerto por defecto según el tipo de base de datos."""
         port_map = {
             "postgresql": 5432,
             "mysql": 3306,
@@ -137,7 +133,7 @@ class SQLTool(BaseTool):
         port: Optional[int],
         database: str
     ) -> Optional[URL]:
-        """Create database URL based on type"""
+        """Crea la URL de conexión según el tipo de base de datos."""
         if database_type == "postgresql":
             return URL.create(
                 drivername="postgresql+asyncpg",
@@ -180,9 +176,7 @@ class SQLTool(BaseTool):
                 )
         return None
 
-    # =============================================================================
-    # Execution
-    # =============================================================================
+    # Ejecución
 
     async def execute(
         self,
@@ -196,7 +190,7 @@ class SQLTool(BaseTool):
         parameters: Optional[Dict[str, Any]] = None,
         fetch_size: int = 100
     ) -> ToolResult:
-        """Execute SQL query against the specified database"""
+        """Ejecuta la consulta SQL en la base de datos especificada."""
         try:
             # Validate inputs
             await self.validate_input(
@@ -320,9 +314,7 @@ class SQLTool(BaseTool):
                 error=str(e)
             )
 
-    # =============================================================================
-    # Helper Methods
-    # =============================================================================
+    # Métodos Auxiliares
 
     async def test_connection(
         self,
@@ -333,7 +325,7 @@ class SQLTool(BaseTool):
         username: str,
         password: str
     ) -> ToolResult:
-        """Test database connection"""
+        """Realiza una prueba de conexión a la base de datos."""
         try:
             # Set default port if not provided
             if port is None:

@@ -110,8 +110,10 @@ class ToolType(str, enum.Enum):
     rag_search = "rag_search"
     codebase_tool = "codebase_tool"
     obsidian_vault_loader = "obsidian_vault_loader"
+    sftp_connection = "sftp_connection"
+    git_tool = "git_tool"
     custom = "custom"
-    
+
     @classmethod
     def _missing_(cls, value):
         """Allow case-insensitive matching"""
@@ -505,6 +507,9 @@ class CustomTool(Base, TimestampMixin):
     # Custom content prompt for LLM context interpretation
     # This allows each tool to define how its results should be presented
     content_prompt: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    
+    # Lista de ejemplos de frases para que el IntentRouter asigne esta herramienta
+    intent_examples: Mapped[List[str]] = mapped_column(JSONB, default=list)
     
     # Visibility control (public, private, shared)
     visibility: Mapped[VisibilityType] = mapped_column(

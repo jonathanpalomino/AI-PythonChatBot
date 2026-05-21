@@ -32,33 +32,31 @@ class SystemPrompts:
         "y hay archivos en el contexto de herramientas, asume que se refiere a ellos."
     )
     
+    # Concise header for tool results - optimized for efficiency
     SOURCE_OF_TRUTH_HEADER = (
-        "## FUENTE DE VERDAD (CONTEXTO DE HERRAMIENTAS)\n"
-        "IMPORTANTE: La siguiente información es VERIFICADA y ACTUAL.\n"
-        "1. Si este contexto contradice cualquier información previa en el historial, "
-        "DEBES IGNORAR el historial y usar ÚNICAMENTE este contexto.\n"
-        "2. Responde en **LENGUAJE NATURAL**. Sé conversacional, conciso y servicial.\n"
-        "3. **NO INVENTES INFORMACIÓN**: Si el contexto no tiene la información solicitada, "
-        "indícalo claramente en lugar de especular.\n\n"
+        "## CONTEXTO DE HERRAMIENTAS"
+        "\nInformación verificada de herramientas. Responde según lo solicitado.\n\n"
     )
 
-    # Header específico para herramientas de código/archivos
+    # Header for RAG tool - includes collection references
+    SOURCE_OF_TRUTH_RAG = (
+        "## DOCUMENTACIÓN (BÚSQUEDA RAG)\n"
+        "Información de archivos en colecciones. Usa esta información para responder. "
+        "Cita las fuentes [Archivo: nombre] en tu respuesta.\n\n"
+    )
+
+    # Ultra-concise alternative (can be used for simpler responses)
+    SOURCE_OF_TRUTH_CONCISE = (
+        "## Resultado de herramienta\n"
+        "Usa esta información para responder.\n\n"
+    )
+
+    # Concise header for codebase tool
     SOURCE_OF_TRUTH_CODEBASE = (
-        "## FUENTE DE VERDAD (ANÁLISIS DE CÓDIGO)\n"
-        "IMPORTANTE: La siguiente información es VERIFICADA y ACTUAL.\n"
-        "1. Si este contexto contradice cualquier información previa en el historial, "
-        "DEBES IGNORAR el historial y usar ÚNICAMENTE este contexto.\n"
-        "2. **RESPONDE EXACTAMENTE LO QUE EL USUARIO PREGUNTÓ**: "
-        "Si el usuario pregunta 'cuántos métodos tiene', responde CON EL NÚMERO y opcionalmente lista los nombres. "
-        "Si pregunta 'qué hace X', explica X. No te extiendas en información adicional del contexto "
-        "(como métricas de calidad, code smells, o análisis de mantenibilidad) a menos que el usuario "
-        "lo solicite explícitamente.\n"
-        "3. Responde en **LENGUAJE NATURAL**. Sé conversacional, conciso y servicial.\n"
-        "4. **USA BLOQUES DE CÓDIGO** (ej. ```sql) para consultas SQL, código o comandos técnicos "
-        "encontrados en el contexto para asegurar la precisión.\n"
-        "5. **CONTEXTO DE ARCHIVO OBJETIVO**: Si el contexto muestra resultados de un archivo específico "
-        "(ej. 'collection_service.py'), responde ÚNICAMENTE sobre ese archivo, ignorando referencias "
-        "a otros archivos que puedan aparecer en el historial de conversación.\n\n"
+        "## ANÁLISIS DE CÓDIGO\n"
+        "Información verificada del código. Responde exactamente lo que el usuario preguntó. "
+        "Si pregunta 'cuántos métodos tiene', responde CON EL NÚMERO. "
+        "Sé conciso.\n\n"
     )
 
     # --- CÓDIGO FUENTE EN CONTEXTO RAG ---
@@ -99,28 +97,19 @@ class SystemPrompts:
     )
 
 
-    SOURCE_OF_TRUTH_FOOTER = "\n\nUsa ÚNICAMENTE la información verificada arriba para proporcionar una respuesta amigable."
+    # Concise footer
+    SOURCE_OF_TRUTH_FOOTER = ""
 
     # For basic_analyze_file (structure only)
     SOURCE_OF_TRUTH_BASIC_STRUCTURE = (
-        "## FUENTE DE VERDAD (ANÁLISIS ESTRUCTURAL)\n"
-        "El contexto contiene la ESTRUCTURA del código analizado.\n"
-        "1. Responde ÚNICAMENTE con la información estructural solicitada "
-        "(cantidad de métodos/clases/funciones).\n"
-        "2. Lista los nombres si es útil para el usuario.\n"
-        "3. NO menciones métricas de calidad, code smells, mantenibilidad, "
-        "o refactorización a menos que el usuario las solicite explícitamente.\n"
-        "4. Sé conciso y directo.\n\n"
+        "## ANÁLISIS ESTRUCTURAL\n"
+        "Responde únicamente la información solicitada. Sé conciso.\n\n"
     )
 
     # For analyze_file (full analysis with quality metrics)
     SOURCE_OF_TRUTH_FULL_ANALYSIS = (
-        "## FUENTE DE VERDAD (ANÁLISIS COMPLETO DE CÓDIGO)\n"
-        "El contexto contiene análisis detallado de calidad y estructura.\n"
-        "1. Resume los hallazgos principales de estructura y calidad.\n"
-        "2. Prioriza problemas críticos de seguridad si existen.\n"
-        "3. Menciona métricas de mantenibilidad y code smells relevantes.\n"
-        "4. Sugiere mejoras cuando sea apropiado.\n\n"
+        "## ANÁLISIS COMPLETO\n"
+        "Resume hallazgos principales. Sé conciso.\n\n"
     )
 
     # --- EXTRACTION SERVICE ---

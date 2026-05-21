@@ -169,6 +169,7 @@ CREATE TABLE custom_tools (
     tool_type tooltype NOT NULL DEFAULT 'http_request',
     configuration JSONB DEFAULT '{}'::jsonb,
     content_prompt TEXT,
+    intent_examples JSONB DEFAULT '[]'::jsonb,
     visibility visibility_type DEFAULT 'public',
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -176,6 +177,7 @@ CREATE TABLE custom_tools (
 );
 
 COMMENT ON COLUMN custom_tools.content_prompt IS 'Instrucciones personalizadas para el LLM sobre cómo interpretar y presentar los resultados de esta herramienta';
+COMMENT ON COLUMN custom_tools.intent_examples IS 'Lista de ejemplos de frases para que el IntentRouter asigne esta herramienta';
 
 CREATE INDEX idx_custom_tools_active ON custom_tools(is_active) WHERE is_active = true;
 CREATE INDEX idx_custom_tools_visibility ON custom_tools(visibility);

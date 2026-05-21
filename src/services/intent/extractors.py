@@ -199,6 +199,58 @@ class TargetExtractor:
 
         return None, {}
 
+    def extract_and_mask(
+        self,
+        query: str,
+        patterns: List[str],
+        mask_token: str = ""
+    ) -> Tuple[str, Optional[str]]:
+        """
+        Extrae target de la query y retorna la query con el target enmascarado/removido.
+        Ideal para normalizar inputs antes de calcular embeddings (Entity Masking).
+
+        Ejemplo:
+             extract_and_mask("dame el codigo de get_value", [r"codigo de (\\w+)"])
+             ("dame el codigo de ", "get_value")
+
+        Args:
+            query: Query original del usuario
+            patterns: Lista de regex patterns
+            mask_token: String con el que reemplazar el target extraído
+
+        Returns:
+            Tuple[query_enmascarada, target_extraido]
+        """
+        if not patterns:
+            return (query, None)
+
+        target, context = self.extract_with_context(query, patterns)
+
+        if not target or not context:
+            return (query, None)
+
+        # Usar la metadata del match para reemplazar
+        original: str = context['original_query']
+        start = context['match_start']
+        end = context['match_end']
+        full_match: str = context['full_match']
+
+        # El pattern puede o no incluir el prefijo (ej: "codigo de ").
+        # Reemplazamos SOLO el substring exacto que capturó el grupo (el target real)
+        # dentro del match entero, para mantener los prefijos intactos.
+        
+        # Encontramos dónde está el target dentro del full_match
+        target_idx = full_match.find(target)
+        if target_idx != -1:
+            masked_match = full_match[:target_idx] + mask_token + full_match[target_idx + len(target):]
+            masked_query = original[:start] + masked_match + original[end:]
+            # Limpiar espacios dobles que puedan haber quedado
+            masked_query = re.sub(r'\s+', ' ', masked_query).strip()
+            return (masked_query, target)
+        
+        # Fallback de seguridad
+        return (query, target)
+
 # Singleton instance (opcional, para facilitar uso)
 _extractor = TargetExtractor()
 

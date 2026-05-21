@@ -1,44 +1,24 @@
 # =============================================================================
 # src/config/intent_patterns.py
-# CodebaseAction Definitions (Cleaned)
+# CodebaseAction Definitions
 # =============================================================================
 """
-Codebase tool action definitions.
+Define las acciones disponibles para CodebaseTool.
 
-Este módulo define ÚNICAMENTE las acciones disponibles para CodebaseTool.
-
-NOTA: Los patrones de intents (INTENT_PATTERNS) han sido movidos a:
-      src/services/intent/config.py (IntentRouter system)
-
-Este archivo se mantiene solo por backward compatibility con:
+Usado directamente por:
 - CodebaseTool.execute(action=...)
 - tool_executor.determine_execution_strategy()
-- chat_orchestrator.py
+- codebase_tool/core.py, llm_formatter.py
 """
-from typing import Dict, List, Callable, Optional
-from dataclasses import dataclass
 
 # =============================================================================
-# CODEBASE TOOL ACTIONS
-# =============================================================================
-@dataclass
-class IntentStrategy:
-    tools: List[str]
-    skip_extraction: bool
-    priority: Optional[str] = None
-    extracted_params: Optional[Callable[[], Dict]] = None
-    reasoning: str = ""
 
 class CodebaseAction:
     """
-    Definición centralizada de todas las acciones de codebase_tool.
+    Constantes de acción para codebase_tool.
 
-    Estas acciones son usadas por:
-    - CodebaseTool.execute(action=CodebaseAction.ANALYZE_FILE)
-    - tool_executor.determine_execution_strategy()
-    - orchestrator al construir parámetros
-
-    Uses snake_case para estandarización.
+    Cada constante corresponde al valor del parámetro `action`
+    que recibe CodebaseTool.execute().
     """
 
     # Action definitions
@@ -53,11 +33,15 @@ class CodebaseAction:
     EXPLAIN = "explain"
     GET_METHOD_CONTENT = "get_method_content"
     MODIFY_METHOD = "modify_method"
+    GET_CLASS_CONTENT ="get_class_content"
+    EXPORT_REFACTORED = "export_refactored"   # NEW: Generate safe versioned copy with fixes
 
-    # All available actions
+    MODIFY_METHOD_ALL_CALLERS = "modify_method_all_callers" # Propagate changes to callers
+
+    # All available actions (used for parameter validation in get_parameters())
     ALL_ACTIONS = [
         ANALYZE_FILE,
-        BASIC_ANALYZE_FILE,  # Structure-only analysis
+        BASIC_ANALYZE_FILE,
         FIND_DEFINITION,
         FIND_REFERENCES,
         GET_CALLERS,
@@ -67,86 +51,11 @@ class CodebaseAction:
         EXPLAIN,
         GET_METHOD_CONTENT,
         MODIFY_METHOD,
+        GET_CLASS_CONTENT,
+        EXPORT_REFACTORED,
+        MODIFY_METHOD_ALL_CALLERS,
     ]
 
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
-def create_intent_strategy(intent_type: str, target: Optional[str] = None,
-                           confidence: float = 0.0) -> IntentStrategy:
-    """Fábrica de estrategias por tipo de intent. SINGLE SOURCE OF TRUTH."""
-
-    strategies = {
-        # ⭐ CONTEO ESTRUCTURA (ligero)
-        "count_structure": IntentStrategy(
-            tools=["codebasetool"],
-            skip_extraction=True,
-            priority="codebasetool",
-            extracted_params=lambda: {"action": CodebaseAction.BASIC_ANALYZE_FILE,
-                                      "target": target},
-            reasoning=f"Count structure {target or 'file'} conf={confidence:.2f}"
-        ),
-
-        # ⭐ ANÁLISIS COMPLETO (pesado)
-        "full_analysis": IntentStrategy(
-            tools=["codebasetool", "ragsearch"],
-            skip_extraction=True,
-            priority="codebasetool",
-            extracted_params=lambda: {"action": CodebaseAction.ANALYZE_FILE, "target": target},
-            reasoning=f"Full analysis {target or 'file'} conf={confidence:.2f}"
-        ),
-
-        # Análisis de calidad específico
-        "analyze_quality": IntentStrategy(
-            tools=["codebasetool"],
-            skip_extraction=True,
-            priority="codebasetool",
-            extracted_params=lambda: {"action": CodebaseAction.ANALYZE_QUALITY, "target": target},
-            reasoning=f"Quality analysis {target} conf={confidence:.2f}"
-        ),
-
-        # Búsqueda definición
-        "find_definition": IntentStrategy(
-            tools=["codebasetool"],
-            skip_extraction=True,
-            priority="codebasetool",
-            extracted_params=lambda: {"action": CodebaseAction.FIND_DEFINITION, "target": target},
-            reasoning=f"Find definition {target} conf={confidence:.2f}"
-        ),
-
-        # Contenido general (RAG)
-        "retrieve_content": IntentStrategy(
-            tools=["ragsearch"],
-            skip_extraction=False,
-            priority="ragsearch",
-            extracted_params=lambda: {"k": 10, "score_threshold": 0.2},
-            reasoning=f"Retrieve content for {target} conf={confidence:.2f}"
-        ),
-
-        # Query general
-        "general_query": IntentStrategy(
-            tools=["ragsearch"],
-            skip_extraction=False,
-            priority="ragsearch",
-            extracted_params=lambda: {"k": 15, "score_threshold": 0.3},
-            reasoning=f"General query conf={confidence:.2f}"
-        ),
-    }
-
-    return strategies.get(intent_type, strategies["general_query"])
-
-
-# Patrones para detect_code_intent (solo nombres de intents)
-COUNT_PATTERNS = [
-    r"cuantos?\s+(métodos?|metodos?|funciones?|clases?)",
-    r"cuántos?\s+(métodos?|metodos?|funciones?|clases?)",
-    r"lista?\s+(métodos?|metodos?|funciones?|clases?)",
-    r"cuántas?\s+(clases?|funciones?)",
-]
-
-QUALITY_PATTERNS = [
-    r"(calidad|issues|smells|mejora|refactor)",
-]
 def is_valid_action(action: str) -> bool:
     """
     Verifica si una acción es válida para codebase_tool.

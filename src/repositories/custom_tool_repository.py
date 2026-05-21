@@ -53,25 +53,26 @@ class CustomToolRepository(BaseRepository[CustomTool]):
     
     async def get_by_name(
         self,
-        conversation_id: UUID,
+        conversation_id: Optional[UUID],
         tool_name: str
     ) -> Optional[CustomTool]:
         """
-        Get custom tool by name within a conversation.
-        
+        Get custom tool by name within a conversation or globally.
+
         Args:
-            conversation_id: Conversation UUID
+            conversation_id: Conversation UUID or None for global
             tool_name: Tool name
-            
+
         Returns:
             Custom tool or None
         """
         try:
             stmt = select(CustomTool).where(
-                CustomTool.conversation_id == conversation_id,
                 CustomTool.name == tool_name,
                 CustomTool.is_active == True
             )
+            if conversation_id is not None:
+                stmt = stmt.where(CustomTool.conversation_id == conversation_id)
             result = await self.db.execute(stmt)
             return result.scalar_one_or_none()
         except Exception as e:
@@ -139,10 +140,10 @@ class CustomToolRepository(BaseRepository[CustomTool]):
     async def get_template_by_tool_type(self, tool_type: str) -> Optional[CustomTool]:
         """
         Get a tool template by its tool_type.
-        
+
         Args:
             tool_type: The tool type identifier (e.g., 'rag_search', 'http_request')
-            
+
         Returns:
             CustomTool template or None if not found
         """
@@ -155,6 +156,28 @@ class CustomToolRepository(BaseRepository[CustomTool]):
             return result.scalar_one_or_none()
         except Exception as e:
             self.logger.error(f"Error getting template by tool_type: {e}")
+            raise
+
+    async def get_active_tools_by_type(self, tool_type: str) -> List[CustomTool]:
+        """
+        Get all active custom tools (not templates) by tool_type.
+
+        Args:
+            tool_type: The tool type identifier (e.g., 'git_tool')
+
+        Returns:
+            List of active CustomTool instances of the specified type
+        """
+        try:
+            stmt = select(CustomTool).where(
+                CustomTool.is_active == True,
+                CustomTool.is_template == False,
+                CustomTool.tool_type == tool_type
+            )
+            result = await self.db.execute(stmt)
+            return list(result.scalars().all())
+        except Exception as e:
+            self.logger.error(f"Error getting active tools by type: {e}")
             raise
     
     async def upsert_template(

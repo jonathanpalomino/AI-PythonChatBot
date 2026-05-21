@@ -1,32 +1,36 @@
-# =============================================================================
-# src/providers/manager.py
-# Unified LLM Provider Manager
-# =============================================================================
-"""
-Gestor unificado de providers de LLM (Local, OpenAI, Claude, Gemini, OpenRouter)
-"""
 import json
+import re
+import os
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Any, AsyncGenerator
+from typing import Dict, List, Optional, Any, AsyncGenerator, Iterator, Union
 
-import anthropic
-from ollama import Client as OllamaClient
-from openai import AsyncOpenAI
+from pydantic import BaseModel
+from litellm import acompletion
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update
+from ollama import Client as OllamaClient
 
 from src.config.settings import settings
 from src.providers.cancellable_stream import CancellableProviderMixin
 from src.utils.date_utils import get_current_utc
 from src.utils.logger import get_logger, get_payload_request_logger, get_payload_response_logger
+from src.models.llm_models import LLMModel
 
-# Loggers
 logger = get_logger(__name__)
 payload_request_logger = get_payload_request_logger()
 payload_response_logger = get_payload_response_logger()
 
+if settings.OPENAI_API_KEY:
+    os.environ["OPENAI_API_KEY"] = settings.OPENAI_API_KEY
+if settings.ANTHROPIC_API_KEY:
+    os.environ["ANTHROPIC_API_KEY"] = settings.ANTHROPIC_API_KEY
+if settings.OPENROUTER_API_KEY:
+    os.environ["OPENROUTER_API_KEY"] = settings.OPENROUTER_API_KEY
+if settings.GROQ_API_KEY:
+    os.environ["GROQ_API_KEY"] = settings.GROQ_API_KEY
 
 class ProviderType(str, Enum):
     """LLM provider types"""
@@ -36,6 +40,8 @@ class ProviderType(str, Enum):
     GOOGLE = "google"
     OPENROUTER = "openrouter"
     GROQ = "groq"
+    WEB_EMULATOR = "web_emulator"
+    CUSTOM = "custom"
 
 
 class ModelType(str, Enum):
@@ -72,13 +78,15 @@ class ModelInfo:
     cpu_supported: bool = True  # Can run on CPU
     gpu_required: bool = False  # Requires GPU
     parent_retrieval_supported: bool = True  # Supports parent document retrieval
+    # False = provider gestiona historial externamente (ej. pestaña de browser)
+    supports_message_history: bool = True
 
 
 @dataclass
 class ChatMessage:
     """Standard chat message format"""
     role: str  # "user", "assistant", "system"
-    content: str
+    content: Union[str, List[Dict[str, Any]]]  # Text or multimodal content blocks
 
 
 @dataclass
@@ -157,19 +165,286 @@ class BaseProvider(ABC):
         return cost_input + cost_output
 
 
-# =============================================================================
-# Local Provider (Ollama)
-# =============================================================================
+class CustomProviderConfig(BaseModel):
+    name: str
+    base_url: str
+    model_prefix: str
+    api_key_env: Optional[str] = None
 
-class LocalProvider(BaseProvider, CancellableProviderMixin):
-    """Ollama local LLM provider with cancellation support"""
 
-    def __init__(self):
-        self.provider_type = ProviderType.LOCAL
-        self.client = OllamaClient(host=settings.OLLAMA_BASE_URL)
-        self._gpu_count = None  # Cache GPU count
-        self._cpu_threads = None  # Cache CPU thread count
+class LiteLLMProviderBase(BaseProvider, CancellableProviderMixin):
+    """
+    Clase base que utiliza LiteLLM para manejar la lógica de chat y stream_chat.
+    Las subclases solo necesitan definir el prefijo del proveedor ("ollama/", "groq/", etc.)
+    y cómo obtener la lista de modelos.
+    """
+
+    def __init__(self, provider_type: ProviderType, litellm_prefix: str = ""):
+        self.provider_type = provider_type
+        self.litellm_prefix = litellm_prefix
         super().__init__()
+
+    def _validate_credentials(self):
+        """La validación se delega a LiteLLM o a la configuración de entorno previa"""
+        pass
+
+    def _format_messages(self, messages: List[ChatMessage]) -> List[Dict]:
+        return [{"role": msg.role, "content": msg.content} for msg in messages]
+
+    def _get_request_params(
+        self,
+        model: str,
+        messages: List[Dict],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict]] = None,
+        stream: bool = False,
+        **kwargs
+    ) -> Dict:
+        """Build request parameters based on provider type."""
+        litellm_model = f"{self.litellm_prefix}{model}" if self.litellm_prefix else model
+
+        request_params = {
+            "model": litellm_model,
+            "messages": messages,
+        }
+
+        if stream:
+            request_params["stream"] = True
+
+        if temperature is not None:
+            request_params["temperature"] = temperature
+        if max_tokens is not None:
+            request_params["max_tokens"] = max_tokens
+        if tools is not None:
+            request_params["tools"] = tools
+            request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
+
+        # Pasamos parámetros adicionales que LiteLLM soporta
+        if self.provider_type == ProviderType.LOCAL:
+            if "num_ctx" in kwargs:
+                request_params["num_ctx"] = kwargs["num_ctx"]
+            request_params["api_base"] = settings.OLLAMA_BASE_URL
+        elif self.provider_type == ProviderType.OPENROUTER:
+            request_params["extra_headers"] = {
+                "HTTP-Referer": "https://github.com/your-repo",
+                "X-Title": settings.APP_NAME,
+            }
+        elif self.provider_type == ProviderType.CUSTOM:
+            if hasattr(self, "config"):
+                request_params["api_base"] = self.config.base_url
+
+        return request_params
+
+    async def chat(
+        self,
+        messages: List[ChatMessage],
+        model: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict]] = None,
+        **kwargs
+    ) -> ChatResponse:
+
+        formatted_messages = self._format_messages(messages)
+        request_params = self._get_request_params(
+            model=model,
+            messages=formatted_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            stream=False,
+            **kwargs
+        )
+
+        payload_request_logger.info(f"LiteLLM Request ({self.provider_type.value}): {json.dumps(request_params, indent=2, default=str)}")
+
+        response = await acompletion(**request_params)
+
+        try:
+            res_dict = response.model_dump()
+            payload_response_logger.info(f"LiteLLM Response ({self.provider_type.value}): {json.dumps(res_dict, indent=2, default=str)}")
+        except Exception as e:
+            payload_response_logger.info(f"LiteLLM Response (non-serializable): {str(e)}")
+
+        message = response.choices[0].message
+        raw_content = message.content or ""
+
+        thinking_content = None
+        final_content = raw_content
+
+        # Procesamiento de think tags: formato chino (o estándar XML) y formato OpenAI (json field)
+        think_pattern = re.compile(r'<(?:think|思考)>(.*?)</(?:think|思考)>', re.DOTALL | re.IGNORECASE)
+        # Algunos modelos pueden retornar "思考\n..." en vez de XML.
+        chinese_pattern = re.compile(r'(?:思考|think)\n(.*?)(?:```|$)', re.DOTALL | re.IGNORECASE)
+
+        think_matches = think_pattern.findall(raw_content)
+        if think_matches:
+            thinking_content = "\n".join(think_matches)
+            final_content = think_pattern.sub('', raw_content).strip()
+        else:
+            chinese_matches = chinese_pattern.findall(raw_content)
+            if chinese_matches and ("```" in raw_content or "\n" in raw_content):
+                # Extraemos el thinking de formato alternativo
+                thinking_content = "\n".join(chinese_matches)
+                final_content = chinese_pattern.sub('', raw_content).strip()
+                # Remove left over "思考" or "think" si no fue capturado bien
+                final_content = re.sub(r'^(思考|think)\n', '', final_content, flags=re.IGNORECASE).strip()
+
+        # Handle Format 2: OpenAI thinking field o JSON de litellm
+        if not thinking_content and raw_content.startswith("["):
+            try:
+                parsed_content = json.loads(raw_content)
+                if isinstance(parsed_content, list):
+                    think_parts = []
+                    text_parts = []
+                    for item in parsed_content:
+                        if item.get("type") == "thinking" and "thinking" in item:
+                            think_parts.append(item["thinking"])
+                        elif item.get("type") == "text" and "content" in item:
+                            text_parts.append(item["content"])
+                    if think_parts:
+                        thinking_content = "\n".join(think_parts)
+                        final_content = "".join(text_parts).strip()
+            except json.JSONDecodeError:
+                pass
+
+        if hasattr(message, "thinking") and message.thinking:
+            if thinking_content:
+                thinking_content += "\n" + message.thinking
+            else:
+                thinking_content = message.thinking
+
+        # Extraer tools
+        tool_calls = None
+        if hasattr(message, "tool_calls") and message.tool_calls:
+            tool_calls = [
+                {
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments
+                }
+                for tc in message.tool_calls
+            ]
+
+        usage = response.usage
+
+        return ChatResponse(
+            content=final_content,
+            model=model,
+            provider=self.provider_type.value,
+            tokens_used=usage.total_tokens if usage else 0,
+            tool_calls=tool_calls,
+            finish_reason=response.choices[0].finish_reason if response.choices else None,
+            thinking_content=thinking_content,
+            metadata={
+                "prompt_tokens": usage.prompt_tokens if usage else 0,
+                "completion_tokens": usage.completion_tokens if usage else 0,
+                "thinking_content": thinking_content
+            }
+        )
+
+    def _process_streaming_thinking(self, delta_content: str, in_think_block: bool) -> Iterator[Dict]:
+        """Process streaming content and detect thinking tags."""
+
+        if not in_think_block:
+            if "<think>" in delta_content:
+                parts = delta_content.split("<think>")
+                if parts[0].strip():
+                    yield {"type": "content", "chunk": parts[0]}
+                delta_content = parts[1] if len(parts) > 1 else ""
+                in_think_block = True
+            elif "思考\n" in delta_content:
+                parts = delta_content.split("思考\n", 1)
+                if parts[0].strip():
+                    yield {"type": "content", "chunk": parts[0]}
+                delta_content = parts[1] if len(parts) > 1 else ""
+                in_think_block = True
+
+        if in_think_block:
+            if "</think>" in delta_content:
+                parts = delta_content.split("</think>")
+                yield {"type": "thinking", "content": parts[0]}
+                in_think_block = False
+                if len(parts) > 1 and parts[1]:
+                    yield {"type": "content", "chunk": parts[1]}
+            elif "```" in delta_content and "思考" not in delta_content:
+                parts = delta_content.split("```", 1)
+                yield {"type": "thinking", "content": parts[0]}
+                in_think_block = False
+                yield {"type": "content", "chunk": f"```{parts[1]}" if len(parts) > 1 else "```"}
+            else:
+                if delta_content:
+                    yield {"type": "thinking", "content": delta_content}
+        else:
+            if delta_content:
+                yield {"type": "content", "chunk": delta_content}
+
+        yield {"in_think_block": in_think_block}
+
+    async def stream_chat(
+        self,
+        messages: List[ChatMessage],
+        model: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        **kwargs
+    ) -> AsyncGenerator[str, None]:
+
+        formatted_messages = self._format_messages(messages)
+        request_params = self._get_request_params(
+            model=model,
+            messages=formatted_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+            **kwargs
+        )
+
+        payload_request_logger.info(f"LiteLLM Stream Request ({self.provider_type.value}): {json.dumps(request_params, indent=2, default=str)}")
+
+        stream = await acompletion(**request_params)
+
+        in_think_block = False
+
+        async for chunk in stream:
+            if not chunk.choices or not chunk.choices[0].delta:
+                continue
+
+            delta_content = chunk.choices[0].delta.content or ""
+
+            delta_thinking = getattr(chunk.choices[0].delta, "thinking", None)
+            if getattr(chunk.choices[0].delta, "reasoning", None):
+                delta_thinking = chunk.choices[0].delta.reasoning
+
+            if delta_thinking:
+                yield json.dumps({"type": "thinking", "content": delta_thinking})
+                if delta_content:
+                    yield json.dumps({"type": "content", "chunk": delta_content})
+                continue
+
+            if self.provider_type in [ProviderType.LOCAL, ProviderType.CUSTOM] and delta_content:
+                for event in self._process_streaming_thinking(delta_content, in_think_block):
+                    if "in_think_block" in event:
+                        in_think_block = event["in_think_block"]
+                    else:
+                        yield json.dumps(event)
+                continue
+
+            if delta_content:
+                yield delta_content
+
+
+# =============================================================================
+# Proveedores Modificados con LiteLLM
+# =============================================================================
+
+class LiteOllamaProvider(LiteLLMProviderBase):
+    def __init__(self):
+        self.client = OllamaClient(host=settings.OLLAMA_BASE_URL)
+        super().__init__(ProviderType.LOCAL, litellm_prefix="ollama/")
+        self._gpu_count = None
+        self._cpu_threads = None
 
     def _detect_gpu_count(self) -> int:
         """Detect number of available GPUs (Linux and Windows compatible)"""
@@ -356,6 +631,7 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
     ) -> ChatResponse:
         """Send chat request to Ollama"""
         import re
+        import asyncio
 
         # Convert messages
         ollama_messages = [
@@ -386,7 +662,9 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
         # Ollama doesn't support function calling natively
         # We would need to implement prompt-based tool calling
 
-        response = self.client.chat(
+        # Run blocking Ollama call in thread pool to avoid blocking the event loop
+        response = await asyncio.to_thread(
+            self.client.chat,
             model=model,
             messages=ollama_messages,
             options=options,
@@ -474,6 +752,7 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
     ) -> AsyncGenerator[str, None]:
         """Stream chat response"""
         import re
+        import asyncio
 
         ollama_messages = [
             {"role": msg.role, "content": msg.content}
@@ -501,7 +780,9 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
         # Prepare and log request body
         self._prepare_request_body(model, ollama_messages, options, stream=True)
 
-        stream = self.client.chat(
+        # Run blocking Ollama stream initialization in thread pool to avoid blocking the event loop
+        stream = await asyncio.to_thread(
+            self.client.chat,
             model=model,
             messages=ollama_messages,
             options=options,
@@ -653,124 +934,9 @@ class LocalProvider(BaseProvider, CancellableProviderMixin):
         return model_list
 
 
-# =============================================================================
-# OpenAI Provider
-# =============================================================================
-
-class OpenAIProvider(BaseProvider, CancellableProviderMixin):
-    """OpenAI provider (GPT-4, GPT-3.5) with cancellation support"""
-
+class LiteOpenAIProvider(LiteLLMProviderBase):
     def __init__(self):
-        self.provider_type = ProviderType.OPENAI
-        super().__init__()
-        self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-
-    def _validate_credentials(self):
-        """Validate OpenAI API key"""
-        if not settings.OPENAI_API_KEY:
-            raise ValueError("OPENAI_API_KEY not configured")
-
-    async def chat(
-        self,
-        messages: List[ChatMessage],
-        model: str,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        tools: Optional[List[Dict]] = None,
-        **kwargs
-    ) -> ChatResponse:
-        """Send chat request to OpenAI"""
-        openai_messages = [
-            {"role": msg.role, "content": msg.content}
-            for msg in messages
-        ]
-
-        request_params = {
-            "model": model,
-            "messages": openai_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
-
-        if tools:
-            request_params["tools"] = tools
-            request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
-
-        # Log request
-        payload_request_logger.info(f"OpenAI Request: {json.dumps(request_params, indent=2, default=str)}")
-
-        response = await self.client.chat.completions.create(**request_params)
-
-        # Log response
-        try:
-            # Simple serializable dict of response
-            res_dict = {
-                "id": response.id,
-                "model": response.model,
-                "usage": response.usage.model_dump() if response.usage else {},
-                "choices": [{"message": c.message.model_dump(), "finish_reason": c.finish_reason} for c in response.choices]
-            }
-            payload_response_logger.info(f"OpenAI Response: {json.dumps(res_dict, indent=2, default=str)}")
-        except Exception as e:
-            payload_response_logger.info(f"OpenAI Response (non-serializable): {str(response)[:200]}...")
-
-        message = response.choices[0].message
-
-        # Extract tool calls if present
-        tool_calls = None
-        if message.tool_calls:
-            tool_calls = [
-                {
-                    "id": tc.id,
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments
-                }
-                for tc in message.tool_calls
-            ]
-
-        return ChatResponse(
-            content=message.content or "",
-            model=response.model,
-            provider=self.provider_type.value,
-            tokens_used=response.usage.total_tokens,
-            tool_calls=tool_calls,
-            finish_reason=response.choices[0].finish_reason,
-            metadata={
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens
-            }
-        )
-
-    async def stream_chat(
-        self,
-        messages: List[ChatMessage],
-        model: str,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        **kwargs
-    ) -> AsyncGenerator[str, None]:
-        """Stream chat response"""
-        openai_messages = [
-            {"role": msg.role, "content": msg.content}
-            for msg in messages
-        ]
-
-        request_params = {
-            "model": model,
-            "messages": openai_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": True
-        }
-
-        # Log request
-        payload_request_logger.info(f"OpenAI Stream Request: {json.dumps(request_params, indent=2, default=str)}")
-
-        stream = await self.client.chat.completions.create(**request_params)
-
-        async for chunk in stream:
-            if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        super().__init__(ProviderType.OPENAI, litellm_prefix="openai/")
 
     def get_available_models(self) -> List[ModelInfo]:
         """Get available OpenAI models"""
@@ -820,307 +986,15 @@ class OpenAIProvider(BaseProvider, CancellableProviderMixin):
         ]
 
 
-# =============================================================================
-# Anthropic Provider (Claude)
-# =============================================================================
-
-class AnthropicProvider(BaseProvider, CancellableProviderMixin):
-    """Anthropic Claude provider with cancellation support"""
-
+class LiteAnthropicProvider(LiteLLMProviderBase):
     def __init__(self):
-        self.provider_type = ProviderType.ANTHROPIC
-        super().__init__()
-        self.client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
-
-    def _validate_credentials(self):
-        """Validate Anthropic API key"""
-        if not settings.ANTHROPIC_API_KEY:
-            raise ValueError("ANTHROPIC_API_KEY not configured")
-
-    async def chat(
-        self,
-        messages: List[ChatMessage],
-        model: str,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        tools: Optional[List[Dict]] = None,
-        **kwargs
-    ) -> ChatResponse:
-        """Send chat request to Claude"""
-        # Separate system message
-        system_messages = []
-        claude_messages = []
-
-        for msg in messages:
-            if msg.role == "system":
-                system_messages.append(msg.content)
-            else:
-                claude_messages.append({
-                    "role": msg.role,
-                    "content": msg.content
-                })
-
-        request_params = {
-            "model": model,
-            "messages": claude_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens or 4096
-        }
-
-        # Concatenate all system messages
-        system_message = "".join(system_messages) if system_messages else None
-
-        if system_message:
-            request_params["system"] = system_message
-
-        if tools:
-            request_params["tools"] = tools
-
-        # Log request
-        payload_request_logger.info(f"Anthropic Request: {json.dumps(request_params, indent=2, default=str)}")
-
-        response = await self.client.messages.create(**request_params)
-
-        # Log response
-        try:
-            res_dict = {
-                "id": response.id,
-                "model": response.model,
-                "usage": response.usage.model_dump() if response.usage else {},
-                "content": [{"type": b.type, "text": getattr(b, 'text', ''), "input": getattr(b, 'input', {})} for b in response.content]
-            }
-            payload_response_logger.info(f"Anthropic Response: {json.dumps(res_dict, indent=2, default=str)}")
-        except Exception as e:
-            payload_response_logger.info(f"Anthropic Response (non-serializable): {str(response)[:200]}...")
-
-        # Extract content and tool calls
-        content = ""
-        tool_calls = []
-
-        for block in response.content:
-            if block.type == "text":
-                content += block.text
-            elif block.type == "tool_use":
-                tool_calls.append({
-                    "id": block.id,
-                    "name": block.name,
-                    "arguments": block.input
-                })
-
-        return ChatResponse(
-            content=content,
-            model=response.model,
-            provider=self.provider_type.value,
-            tokens_used=response.usage.input_tokens + response.usage.output_tokens,
-            tool_calls=tool_calls if tool_calls else None,
-            finish_reason=response.stop_reason,
-            metadata={
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens
-            }
-        )
-
-    async def stream_chat(
-        self,
-        messages: List[ChatMessage],
-        model: str,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        **kwargs
-    ) -> AsyncGenerator[str, None]:
-        """Stream chat response"""
-        system_message = None
-        claude_messages = []
-
-        for msg in messages:
-            if msg.role == "system":
-                system_message = msg.content
-            else:
-                claude_messages.append({
-                    "role": msg.role,
-                    "content": msg.content
-                })
-
-        request_params = {
-            "model": model,
-            "messages": claude_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens or 4096,
-            "stream": True
-        }
-
-        if system_message:
-            request_params["system"] = system_message
-
-        # Log request
-        payload_request_logger.info(f"Anthropic Stream Request: {json.dumps(request_params, indent=2, default=str)}")
-
-        async with self.client.messages.stream(**request_params) as stream:
-            async for text in stream.text_stream:
-                yield text
-
-    def get_available_models(self) -> List[ModelInfo]:
-        """Get available Claude models"""
-        return [
-            ModelInfo(
-                name="claude-3-5-sonnet-20241022",
-                provider=ProviderType.ANTHROPIC,
-                context_window=200000,
-                supports_function_calling=True,
-                supports_streaming=True,
-                model_type=ModelType.CHAT,
-                cost_per_1k_input=0.003,
-                cost_per_1k_output=0.015,
-                # Anthropic models run on cloud infrastructure
-                cpu_supported=False,
-                gpu_required=True,
-                parent_retrieval_supported=True
-            ),
-            ModelInfo(
-                name="claude-3-opus-20240229",
-                provider=ProviderType.ANTHROPIC,
-                context_window=200000,
-                supports_function_calling=True,
-                supports_streaming=True,
-                model_type=ModelType.CHAT,
-                cost_per_1k_input=0.015,
-                cost_per_1k_output=0.075,
-                # Anthropic models run on cloud infrastructure
-                cpu_supported=False,
-                gpu_required=True,
-                parent_retrieval_supported=True
-            )
-        ]
+        super().__init__(ProviderType.ANTHROPIC, litellm_prefix="anthropic/")
 
 
-# =============================================================================
-# OpenRouter Provider
-# =============================================================================
 
-class OpenRouterProvider(BaseProvider, CancellableProviderMixin):
-    """OpenRouter provider (OpenAI-compatible) with cancellation support"""
-
+class LiteOpenRouterProvider(LiteLLMProviderBase):
     def __init__(self):
-        self.provider_type = ProviderType.OPENROUTER
-        super().__init__()
-        self.client = AsyncOpenAI(
-            api_key=settings.OPENROUTER_API_KEY,
-            base_url="https://openrouter.ai/api/v1"
-        )
-
-    def _validate_credentials(self):
-        """Validate OpenRouter API key"""
-        if not settings.OPENROUTER_API_KEY:
-            raise ValueError("OPENROUTER_API_KEY not configured")
-
-    async def chat(
-        self,
-        messages: List[ChatMessage],
-        model: str,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        tools: Optional[List[Dict]] = None,
-        **kwargs
-    ) -> ChatResponse:
-        """Send chat request to OpenRouter"""
-        openrouter_messages = [
-            {"role": msg.role, "content": msg.content}
-            for msg in messages
-        ]
-
-        request_params = {
-            "model": model,
-            "messages": openrouter_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "extra_headers": {
-                "HTTP-Referer": "https://github.com/your-repo",  # Optional, for OpenRouter rankings
-                "X-Title": settings.APP_NAME,  # Optional
-            }
-        }
-
-        if tools:
-            request_params["tools"] = tools
-            request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
-
-        # Log request
-        payload_request_logger.info(f"OpenRouter Request: {json.dumps(request_params, indent=2, default=str)}")
-
-        response = await self.client.chat.completions.create(**request_params)
-
-        # Log response
-        try:
-            res_dict = {
-                "id": response.id,
-                "model": response.model,
-                "usage": response.usage.model_dump() if response.usage else {},
-                "choices": [{"message": c.message.model_dump(), "finish_reason": c.finish_reason} for c in response.choices]
-            }
-            payload_response_logger.info(f"OpenRouter Response: {json.dumps(res_dict, indent=2, default=str)}")
-        except Exception as e:
-            payload_response_logger.info(f"OpenRouter Response (non-serializable): {str(response)[:200]}...")
-
-        message = response.choices[0].message
-
-        # Extract tool calls if present
-        tool_calls = None
-        if message.tool_calls:
-            tool_calls = [
-                {
-                    "id": tc.id,
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments
-                }
-                for tc in message.tool_calls
-            ]
-
-        return ChatResponse(
-            content=message.content or "",
-            model=response.model,
-            provider=self.provider_type.value,
-            tokens_used=response.usage.total_tokens if response.usage else 0,
-            tool_calls=tool_calls,
-            finish_reason=response.choices[0].finish_reason,
-            metadata={
-                "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-                "completion_tokens": response.usage.completion_tokens if response.usage else 0
-            }
-        )
-
-    async def stream_chat(
-        self,
-        messages: List[ChatMessage],
-        model: str,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        **kwargs
-    ) -> AsyncGenerator[str, None]:
-        """Stream chat response"""
-        openrouter_messages = [
-            {"role": msg.role, "content": msg.content}
-            for msg in messages
-        ]
-
-        request_params = {
-            "model": model,
-            "messages": openrouter_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": True,
-            "extra_headers": {
-                "HTTP-Referer": "https://github.com/your-repo",
-                "X-Title": settings.APP_NAME,
-            }
-        }
-
-        # Log request
-        payload_request_logger.info(f"OpenRouter Stream Request: {json.dumps(request_params, indent=2, default=str)}")
-
-        stream = await self.client.chat.completions.create(**request_params)
-
-        async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        super().__init__(ProviderType.OPENROUTER, litellm_prefix="openrouter/")
 
     def get_available_models(self) -> List[ModelInfo]:
         """Get available OpenRouter models"""
@@ -1234,126 +1108,9 @@ class OpenRouterProvider(BaseProvider, CancellableProviderMixin):
         ]
 
 
-# =============================================================================
-# Groq Provider
-# =============================================================================
-
-class GroqProvider(BaseProvider, CancellableProviderMixin):
-    """Groq provider (OpenAI-compatible) with cancellation support"""
-
+class LiteGroqProvider(LiteLLMProviderBase):
     def __init__(self):
-        self.provider_type = ProviderType.GROQ
-        super().__init__()
-        self.client = AsyncOpenAI(
-            api_key=settings.GROQ_API_KEY,
-            base_url="https://api.groq.com/openai/v1"
-        )
-
-    def _validate_credentials(self):
-        """Validate Groq API key"""
-        if not settings.GROQ_API_KEY:
-            raise ValueError("GROQ_API_KEY not configured")
-
-    async def chat(
-        self,
-        messages: List[ChatMessage],
-        model: str,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        tools: Optional[List[Dict]] = None,
-        **kwargs
-    ) -> ChatResponse:
-        """Send chat request to Groq"""
-        groq_messages = [
-            {"role": msg.role, "content": msg.content}
-            for msg in messages
-        ]
-
-        request_params = {
-            "model": model,
-            "messages": groq_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
-
-        if tools:
-            request_params["tools"] = tools
-            request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
-
-        # Log request
-        payload_request_logger.info(f"Groq Request: {json.dumps(request_params, indent=2, default=str)}")
-
-        response = await self.client.chat.completions.create(**request_params)
-
-        # Log response
-        try:
-            res_dict = {
-                "id": response.id,
-                "model": response.model,
-                "usage": response.usage.model_dump() if response.usage else {},
-                "choices": [{"message": c.message.model_dump(), "finish_reason": c.finish_reason} for c in response.choices]
-            }
-            payload_response_logger.info(f"Groq Response: {json.dumps(res_dict, indent=2, default=str)}")
-        except Exception as e:
-            payload_response_logger.info(f"Groq Response (non-serializable): {str(response)[:200]}...")
-
-        message = response.choices[0].message
-
-        # Extract tool calls if present
-        tool_calls = None
-        if message.tool_calls:
-            tool_calls = [
-                {
-                    "id": tc.id,
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments
-                }
-                for tc in message.tool_calls
-            ]
-
-        return ChatResponse(
-            content=message.content or "",
-            model=response.model,
-            provider=self.provider_type.value,
-            tokens_used=response.usage.total_tokens if response.usage else 0,
-            tool_calls=tool_calls,
-            finish_reason=response.choices[0].finish_reason,
-            metadata={
-                "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-                "completion_tokens": response.usage.completion_tokens if response.usage else 0
-            }
-        )
-
-    async def stream_chat(
-        self,
-        messages: List[ChatMessage],
-        model: str,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        **kwargs
-    ) -> AsyncGenerator[str, None]:
-        """Stream chat response"""
-        groq_messages = [
-            {"role": msg.role, "content": msg.content}
-            for msg in messages
-        ]
-
-        request_params = {
-            "model": model,
-            "messages": groq_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": True
-        }
-
-        # Log request
-        payload_request_logger.info(f"Groq Stream Request: {json.dumps(request_params, indent=2, default=str)}")
-
-        stream = await self.client.chat.completions.create(**request_params)
-
-        async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        super().__init__(ProviderType.GROQ, litellm_prefix="groq/")
 
     def get_available_models(self) -> List[ModelInfo]:
         """Get available Groq models"""
@@ -1417,262 +1174,151 @@ class GroqProvider(BaseProvider, CancellableProviderMixin):
         ]
 
 
-# =============================================================================
-# Provider Manager
-# =============================================================================
+class CustomLiteLLMProvider(LiteLLMProviderBase):
+    """LiteLLM provider for custom providers"""
+    def __init__(self, config: CustomProviderConfig):
+        super().__init__(
+            provider_type=ProviderType.CUSTOM,
+            litellm_prefix=f"{config.model_prefix}/" if config.model_prefix else ""
+        )
+        self.config = config
+        if config.api_key_env:
+            api_key = os.getenv(config.api_key_env)
+            if api_key:
+                os.environ[f"{config.name.upper()}_API_KEY"] = api_key
+
+    def get_available_models(self) -> List[ModelInfo]:
+        return []
 
 class ProviderManager:
-    """Manages all LLM providers"""
+    """Manages all LLM providers powered by LiteLLM"""
 
     def __init__(self):
-        self.providers: Dict[ProviderType, BaseProvider] = {}
+        self.providers: Dict[str, BaseProvider] = {}
         self._initialize_providers()
 
     def _initialize_providers(self):
-        """Initialize available providers"""
-        # Local (always available if Ollama is running)
+        """Initialize available providers using LiteLLM classes"""
         try:
-            self.providers[ProviderType.LOCAL] = LocalProvider()
-            print("✅ Local provider (Ollama) initialized")
+            self.providers[ProviderType.LOCAL.value] = LiteOllamaProvider()
+            logger.info("✅ LiteLLM Local provider (Ollama) initialized")
         except Exception as e:
-            print(f"⚠️  Local provider unavailable: {e}")
+            logger.warning(f"⚠️  Local provider unavailable: {e}")
 
-        # OpenAI
         if settings.OPENAI_API_KEY:
             try:
-                self.providers[ProviderType.OPENAI] = OpenAIProvider()
-                print("✅ OpenAI provider initialized")
+                self.providers[ProviderType.OPENAI.value] = LiteOpenAIProvider()
+                logger.info("✅ LiteLLM OpenAI provider initialized")
             except Exception as e:
-                print(f"⚠️  OpenAI provider failed: {e}")
+                pass
 
-        # Anthropic
         if settings.ANTHROPIC_API_KEY:
             try:
-                self.providers[ProviderType.ANTHROPIC] = AnthropicProvider()
-                print("✅ Anthropic provider initialized")
+                self.providers[ProviderType.ANTHROPIC.value] = LiteAnthropicProvider()
+                logger.info("✅ LiteLLM Anthropic provider initialized")
             except Exception as e:
-                print(f"⚠️  Anthropic provider failed: {e}")
+                pass
 
-        # OpenRouter
         if settings.OPENROUTER_API_KEY:
             try:
-                self.providers[ProviderType.OPENROUTER] = OpenRouterProvider()
-                print("✅ OpenRouter provider initialized")
+                self.providers[ProviderType.OPENROUTER.value] = LiteOpenRouterProvider()
+                logger.info("✅ LiteLLM OpenRouter provider initialized")
             except Exception as e:
-                print(f"⚠️  OpenRouter provider failed: {e}")
+                pass
 
-        # Groq
         if settings.GROQ_API_KEY:
             try:
-                self.providers[ProviderType.GROQ] = GroqProvider()
-                print("✅ Groq provider initialized")
+                self.providers[ProviderType.GROQ.value] = LiteGroqProvider()
+                logger.info("✅ LiteLLM Groq provider initialized")
             except Exception as e:
-                print(f"⚠️  Groq provider failed: {e}")
+                pass
 
     def get_provider(self, provider_type: str) -> BaseProvider:
-        """Get provider by type"""
-        provider_enum = ProviderType(provider_type)
+        if provider_type in self.providers:
+            return self.providers[provider_type]
+        raise ValueError(f"Provider {provider_type} not available in Manager V2")
 
-        if provider_enum not in self.providers:
-            # Try to lazily initialize local provider if it was unavailable at startup
-            if provider_enum == ProviderType.LOCAL:
-                try:
-                    self.providers[ProviderType.LOCAL] = LocalProvider()
-                    print("✅ Local provider (Ollama) initialized on-demand")
-                except Exception as e:
-                    raise ValueError(f"Provider {provider_type} not available: {e}")
-            elif provider_enum == ProviderType.OPENROUTER and settings.OPENROUTER_API_KEY:
-                 try:
-                    self.providers[ProviderType.OPENROUTER] = OpenRouterProvider()
-                    print("✅ OpenRouter provider initialized on-demand")
-                 except Exception as e:
-                    raise ValueError(f"Provider {provider_type} not available: {e}")
-            elif provider_enum == ProviderType.GROQ and settings.GROQ_API_KEY:
-                 try:
-                    self.providers[ProviderType.GROQ] = GroqProvider()
-                    print("✅ Groq provider initialized on-demand")
-                 except Exception as e:
-                    raise ValueError(f"Provider {provider_type} not available: {e}")
-            else:
-                raise ValueError(f"Provider {provider_type} not available")
-
-        return self.providers[provider_enum]
+    def register_custom_provider(
+        self,
+        provider_name: str,
+        base_url: str,
+        model_prefix: str,
+        api_key_env: Optional[str] = None
+    ):
+        """Register a custom provider dynamically"""
+        config = CustomProviderConfig(
+            name=provider_name,
+            base_url=base_url,
+            model_prefix=model_prefix,
+            api_key_env=api_key_env
+        )
+        provider = CustomLiteLLMProvider(config)
+        self.providers[provider_name] = provider
+        logger.info(f"✅ Custom provider {provider_name} registered")
 
     def get_available_providers(self) -> List[str]:
-        """Get list of available provider names"""
-        return [p.value for p in self.providers.keys()]
+        return list(self.providers.keys())
 
-    async def sync_available_models(self, db_session: AsyncSession):
+    async def sync_available_models(self, db_session: AsyncSession) -> List[str]:
         """
-        Sync available models from providers to database.
-        Preserves existing manual configuration.
-        Uses Ollama API metadata for better type detection.
+        Synchronize available models from all providers to database.
         """
-        from sqlalchemy import select
-        from src.models.llm_models import LLMModel
+        logger.info("🔄 Syncing models from providers (V2)...")
+        uncertain_models = []
 
-        print("🔄 Syncing models from providers...")
-        uncertain_models = []  # Track models needing manual classification
-
-        # 1. Get all models from all providers
         all_provider_models: List[ModelInfo] = []
         for provider_name, provider in self.providers.items():
             try:
                 models = provider.get_available_models()
                 all_provider_models.extend(models)
             except Exception as e:
-                print(f"⚠️  Failed to fetch models from {provider_name}: {e}")
+                logger.warning(f"⚠️ Failed to fetch models from {provider_name}: {e}")
 
-        # 2. Sync with DB
         for model_info in all_provider_models:
-            # Check if exists
+            provider_val = model_info.provider.value if isinstance(model_info.provider, ProviderType) else str(model_info.provider)
             stmt = select(LLMModel).where(
-                LLMModel.provider == model_info.provider.value,
+                LLMModel.provider == provider_val,
                 LLMModel.model_name == model_info.name
             )
             result = await db_session.execute(stmt)
             existing_model = result.scalar_one_or_none()
 
-            # Infer capabilities
             inferred_type = model_info.model_type
-            supports_thinking = False
-            confidence = "high"  # high, medium, low
-
-            # Enhanced detection for LOCAL (Ollama) models
-            if model_info.provider == ProviderType.LOCAL and inferred_type == ModelType.CHAT:
-                name_lower = model_info.name.lower()
-
-                # Try to get detailed model info from Ollama
-                try:
-                    # Get the LocalProvider instance
-                    local_provider = self.providers.get(ProviderType.LOCAL)
-                    if local_provider and hasattr(local_provider, 'client'):
-                        model_details = local_provider.client.show(model_info.name)
-
-                        # Analyze template for reasoning indicators
-                        template = model_details.get('template', '').lower()
-                        system = model_details.get('system', '').lower()
-
-                        # Strong indicators of TRUE reasoning models (deepseek-r1 style)
-                        reasoning_indicators = [
-                            'chain of thought', 'step by step reasoning',
-                            'reasoning process', 'thought process'
-                        ]
-
-                        # Indicators of thinking capability (gemma3, qwen3 style)
-                        thinking_indicators = [
-                            '<think>', '<thinking>', '</think>',
-                            '<reasoning>', '</reasoning>'
-                        ]
-
-                        has_thinking_tags = any(
-                            indicator in template or indicator in system for indicator in
-                            thinking_indicators)
-                        has_reasoning_focus = any(
-                            indicator in template or indicator in system for indicator in
-                            reasoning_indicators)
-
-                        if has_reasoning_focus:
-                            # True reasoning model (deepseek-r1)
-                            inferred_type = ModelType.REASONING
-                            supports_thinking = True
-                            confidence = "high"
-                            print(f"  ✓ {model_info.name}: REASONING (detected via template)")
-                        elif has_thinking_tags:
-                            # Chat with thinking capability (gemma3, qwen3)
-                            inferred_type = ModelType.CHAT
-                            supports_thinking = True
-                            confidence = "high"
-                            print(
-                                f"  ✓ {model_info.name}: CHAT with thinking (detected via template)")
-                        else:
-                            # Fallback to name heuristics
-                            if any(k in name_lower for k in
-                                   ["deepseek-r1", "r1", "reasoner", "cot", "qwq"]):
-                                inferred_type = ModelType.REASONING
-                                supports_thinking = True
-                                confidence = "medium"
-                                print(f"  ✓ {model_info.name}: REASONING (name heuristic)")
-                            elif any(k in name_lower for k in
-                                     ["gemma3", "qwen3", "qwen2.5", "thinking"]):
-                                inferred_type = ModelType.CHAT
-                                supports_thinking = True
-                                confidence = "medium"
-                                print(f"  ✓ {model_info.name}: CHAT with thinking (name heuristic)")
-                            else:
-                                # Cannot determine - mark as uncertain
-                                confidence = "low"
-                                uncertain_models.append(model_info.name)
-                                print(
-                                    f"  ? {model_info.name}: CHAT (uncertain - needs verification)")
-
-                except Exception as e:
-                    # Failed to get details, use name heuristics only
-                    if any(
-                        k in name_lower for k in ["deepseek-r1", "r1", "reasoner", "cot", "qwq"]):
-                        inferred_type = ModelType.REASONING
-                        supports_thinking = True
-                        confidence = "medium"
-                    elif any(k in name_lower for k in ["gemma3", "qwen3", "qwen2.5", "thinking"]):
-                        inferred_type = ModelType.CHAT
-                        supports_thinking = True
-                        confidence = "medium"
-                    else:
-                        confidence = "low"
-                        uncertain_models.append(model_info.name)
+            supports_thinking = model_info.supports_thinking
 
             if existing_model:
-                # Update last_seen
-                existing_model.last_seen = get_current_utc()
-                # Only update capabilities if NOT custom (user manual override protection)
                 if not existing_model.is_custom:
-                    # Update context window if it changed
+                    existing_model.model_type = inferred_type
                     existing_model.context_window = model_info.context_window
-                    # Don't overwrite type if it's already set to something specific,
-                    # unless we are upgrading from generic CHAT to more specific REASONING
-                    if existing_model.model_type == ModelType.CHAT.value and inferred_type == ModelType.REASONING:
-                        existing_model.model_type = inferred_type.value
-
-                    # Update pricing info
-                    if hasattr(existing_model, 'is_free'):
-                         existing_model.is_free = model_info.is_free
-                    if hasattr(existing_model, 'cost_per_1k_input'):
-                        existing_model.cost_per_1k_input = model_info.cost_per_1k_input
-                        existing_model.cost_per_1k_output = model_info.cost_per_1k_output
+                    existing_model.supports_function_calling = model_info.supports_function_calling
+                    existing_model.supports_streaming = model_info.supports_streaming
+                    existing_model.supports_thinking = supports_thinking
+                    existing_model.is_active = model_info.is_active
+                    existing_model.last_seen = get_current_utc()
             else:
-                # Create new
                 new_model = LLMModel(
-                    provider=model_info.provider.value,
+                    provider=provider_val,
                     model_name=model_info.name,
-                    model_type=inferred_type.value,
+                    model_type=inferred_type,
                     context_window=model_info.context_window,
                     supports_streaming=model_info.supports_streaming,
                     supports_function_calling=model_info.supports_function_calling,
                     supports_thinking=supports_thinking,
-                    is_active=True,
-                    # Hardware requirements and capabilities
+                    is_active=model_info.is_active,
                     cpu_supported=model_info.cpu_supported,
                     gpu_required=model_info.gpu_required,
-                    parent_retrieval_supported=model_info.parent_retrieval_supported,
-                    # Pricing
-                    is_free=model_info.is_free,
-                    cost_per_1k_input=model_info.cost_per_1k_input,
-                    cost_per_1k_output=model_info.cost_per_1k_output
+                    parent_retrieval_supported=model_info.parent_retrieval_supported
                 )
                 db_session.add(new_model)
 
         await db_session.commit()
-        print("✅ Model sync complete")
-
-        # Report uncertain models
-        if uncertain_models:
-            print(f"\n⚠️  UNCERTAIN MODELS ({len(uncertain_models)}):")
-            print("   The following models need manual classification:")
-            for model in uncertain_models:
-                print(f"   - {model}")
-            print("   → Check Ollama library or run: ollama show <model_name>")
-
         return uncertain_models
+
+
+
+
+
+
 
     async def get_available_models(self, db_session: AsyncSession = None) -> List[ModelInfo]:
         """
@@ -1722,26 +1368,5 @@ class ProviderManager:
             for m in db_models
         ]
 
-    def get_all_models(self) -> Dict[str, List[ModelInfo]]:
-        """Deprecated: use get_available_models with DB session"""
-        return self._get_all_models_legacy()
-
-    def _get_all_models_legacy(self) -> Dict[str, List[ModelInfo]]:
-        """Get all available models from all providers"""
-        all_models = {}
-
-        for provider_type, provider in self.providers.items():
-            try:
-                all_models[provider_type.value] = provider.get_available_models()
-            except Exception as e:
-                print(f"⚠️  Failed to get models from {provider_type}: {e}")
-                all_models[provider_type.value] = []
-
-        return all_models
-
-
-# =============================================================================
-# Global Manager Instance
-# =============================================================================
 
 provider_manager = ProviderManager()

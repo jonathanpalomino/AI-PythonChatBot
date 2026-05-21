@@ -3,25 +3,7 @@
 # RAG Search Tool - Professional Edition
 # =============================================================================
 """
-Professional Tool for performing Retrieval-Augmented Generation (RAG) searches over Qdrant collections.
-
-Features:
-- Multiple search modes: semantic, lexical, hybrid, full_document
-- Cross-encoder re-ranking for improved result quality
-- Hybrid search with Reciprocal Rank Fusion (RRF)
-- Parent document retrieval
-- Contextual retrieval with LLM-generated context
-- Enhanced search with 4 fallback strategies
-- Metadata enrichment
-- Query expansion
-- Thread-safe BM25 index caching
-- Timeout protection
-- Professional input validation and sanitization
-- Comprehensive metrics collection and monitoring
-- LRU caching for embeddings
-- Retry logic with exponential backoff
-- Health checks
-- Performance timing
+Herramienta para realizar búsquedas RAG (Generación Aumentada por Recuperación) sobre colecciones de Qdrant.
 """
 
 import asyncio
@@ -52,13 +34,13 @@ from src.tools.rag_tool_utils import (
     ValidationResult,
     SearchMetrics,
 )
-from src.utils.health_checker import HealthChecker, HealthCheckResult
 from src.utils.health_checker import HealthCheckResult
+from src.utils.health_checker import HealthChecker
 from src.utils.logger import get_logger
 
 
 class RAGTool(BaseTool):
-    """Tool for searching in Qdrant collections"""
+    """Herramienta para búsqueda en colecciones de Qdrant."""
 
     def __init__(self):
         # Initialize clients
@@ -92,9 +74,7 @@ class RAGTool(BaseTool):
 
         super().__init__()
 
-    # =============================================================================
-    # Tool Definition
-    # =============================================================================
+    # Definición de la Herramienta
 
     @property
     def name(self) -> str:
@@ -102,7 +82,7 @@ class RAGTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Search for relevant information in documentation collections using semantic search"
+        return "Busca información relevante en colecciones de documentos usando búsqueda semántica."
 
     @property
     def category(self) -> ToolCategory:
@@ -116,26 +96,37 @@ class RAGTool(BaseTool):
     def requires_context(self) -> List[str]:
         return ["qdrant"]
 
+    @property
+    def required_dependencies(self) -> List[str]:
+        """Dependencias de infraestructura que esta tool necesita."""
+        return ["qdrant"]
+
+    @property
+    def file_dependent_actions(self) -> set:
+        """Acciones que requieren archivos para ejecutarse."""
+        # RAG siempre requiere archivos o colección
+        return {"search", "full_document", "semantic_search"}
+
     def get_parameters(self) -> List[ToolParameter]:
         return [
             ToolParameter(
                 name="query",
                 type="string",
-                description="Search query to find relevant documentation",
+                description="Consulta de búsqueda para encontrar documentación relevante.",
                 required=False,
-                example="How to configure the HTTP tool"
+                example="Cómo configurar la herramienta HTTP"
             ),
             ToolParameter(
                 name="collections",
                 type="array",
-                description="List of collection names to search in",
+                description="Lista de nombres de colecciones en las que buscar.",
                 required=False,
                 example=["documentation", "api_guide"]
             ),
             ToolParameter(
                 name="k",
                 type="integer",
-                description=f"Number of results to return (default: {DEFAULT_RAG_LIMIT})",
+                description=f"Número de resultados a retornar (por defecto: {DEFAULT_RAG_LIMIT}).",
                 required=False,
                 default=DEFAULT_RAG_LIMIT,
                 example=DEFAULT_RAG_LIMIT
@@ -143,7 +134,7 @@ class RAGTool(BaseTool):
             ToolParameter(
                 name="score_threshold",
                 type="number",
-                description=f"Minimum similarity score (0.0-1.0, default: {DEFAULT_SCORE_THRESHOLD})",
+                description=f"Puntaje mínimo de similitud (0.0-1.0, por defecto: {DEFAULT_SCORE_THRESHOLD}).",
                 required=False,
                 default=DEFAULT_SCORE_THRESHOLD,
                 example=DEFAULT_SCORE_THRESHOLD
@@ -151,7 +142,7 @@ class RAGTool(BaseTool):
             ToolParameter(
                 name="filters",
                 type="object",
-                description="Additional filters (e.g., {\"method\": \"GET\", \"context\": \"NWT\"})",
+                description="Filtros adicionales (ej., {\"method\": \"GET\", \"context\": \"NWT\"}).",
                 required=False,
                 default={},
                 example={"method": "GET", "context": "NWT"}
@@ -159,7 +150,7 @@ class RAGTool(BaseTool):
             ToolParameter(
                 name="enable_rerank",
                 type="boolean",
-                description="Enable re-ranking with cross-encoder (default: False)",
+                description="Habilitar re-ranking con cross-encoder (por defecto: False).",
                 required=False,
                 default=False,
                 example=False
@@ -167,7 +158,7 @@ class RAGTool(BaseTool):
             ToolParameter(
                 name="rerank_top_k",
                 type="integer",
-                description="Number of results after re-ranking (default: same as k)",
+                description="Número de resultados tras el re-ranking (por defecto: el mismo que k).",
                 required=False,
                 default=None,
                 example=5
@@ -175,7 +166,7 @@ class RAGTool(BaseTool):
             ToolParameter(
                 name="search_mode",
                 type="string",
-                description="Search mode: 'semantic', 'lexical', 'hybrid', or 'full_document' (default: 'semantic')",
+                description="Modo de búsqueda: 'semantic', 'lexical', 'hybrid', o 'full_document' (por defecto: 'semantic').",
                 required=False,
                 default="semantic",
                 example="semantic"
@@ -183,7 +174,7 @@ class RAGTool(BaseTool):
             ToolParameter(
                 name="hybrid_alpha",
                 type="number",
-                description="Weight for semantic vs lexical in hybrid mode (0.0-1.0, default: 0.5)",
+                description="Peso para búsqueda semántica vs léxica en modo híbrido (0.0-1.0, por defecto: 0.5).",
                 required=False,
                 default=0.5,
                 example=0.5
@@ -191,7 +182,7 @@ class RAGTool(BaseTool):
             ToolParameter(
                 name="enable_parent_retrieval",
                 type="boolean",
-                description="Enable parent document retrieval (default: False)",
+                description="Habilitar recuperación de documentos padre (por defecto: False).",
                 required=False,
                 default=False,
                 example=False
@@ -199,7 +190,7 @@ class RAGTool(BaseTool):
             ToolParameter(
                 name="parent_mode",
                 type="string",
-                description="Parent retrieval mode: 'full_parent' or 'windowed' (default: 'full_parent')",
+                description="Modo de recuperación padre: 'full_parent' o 'windowed' (por defecto: 'full_parent').",
                 required=False,
                 default="full_parent",
                 example="full_parent"
@@ -207,7 +198,7 @@ class RAGTool(BaseTool):
             ToolParameter(
                 name="embedding_model",
                 type="string",
-                description="Embedding model to use for query generation",
+                description="Modelo de embedding a usar para la generación de la consulta.",
                 required=False,
                 default=None,
                 example="nomic-embed-text"
@@ -215,7 +206,7 @@ class RAGTool(BaseTool):
             ToolParameter(
                 name="enable_contextual_retrieval",
                 type="boolean",
-                description="Enable contextual retrieval for improved search quality",
+                description="Habilitar recuperación contextual para mejorar la calidad de búsqueda.",
                 required=False,
                 default=settings.ENABLE_CONTEXTUAL_RETRIEVAL,
                 example=True
@@ -223,31 +214,25 @@ class RAGTool(BaseTool):
             ToolParameter(
                 name="context_generation_model",
                 type="string",
-                description="Model to use for generating context descriptions",
+                description="Modelo a usar para generar descripciones de contexto.",
                 required=False,
                 default=settings.CONTEXT_GENERATION_MODEL,
                 example="qwen2.5:3b"
             ),
         ]
 
-    # =========================================================================
     # Contratos declarativos v2.0 — ToolSelector / IntentRouter
-    # =========================================================================
 
     @property
     def requires_intent_classification(self) -> bool:
         """
-        RAGTool no necesita routing interno.
-        Su selección ocurre vía score_tools_for_query() en el Orchestrator.
-        Una vez seleccionada, siempre ejecuta la misma acción: búsqueda semántica.
+        RAGTool no necesita enrutamiento interno complejo ya que su acción principal es la búsqueda.
         """
         return False
 
     def get_intent_definitions(self) -> Dict[str, Any]:
         """
-        Retorna los intents de RAGTool desde INTENT_REGISTRY.
-        Fuente de verdad: config.py (rag_search, conversational).
-        No duplica ejemplos en código.
+        Retorna las definiciones de intención para RAGTool.
         """
         from src.services.intent.config import get_intents_by_registered_tool
         intents = get_intents_by_registered_tool("rag_search")
@@ -264,21 +249,7 @@ class RAGTool(BaseTool):
             for i in intents
         }
 
-    async def is_relevant(self, context: Any) -> bool:
-        """
-        RAGTool es relevante cuando hay contenido vectorizado disponible.
-        No penaliza por tipo de query: RAGTool es multi-propósito.
-        Su score en score_tools_for_query() determina si es la adecuada.
-        """
-        return bool(
-            getattr(context, 'file_ids', None) or
-            getattr(context, 'collection_name', None) or
-            getattr(context, 'target_file_id', None)
-        )
-
-    # =============================================================================
-    # Execution
-    # =============================================================================
+    # Ejecución
 
     async def get_full_document_content(
         self,
@@ -286,14 +257,14 @@ class RAGTool(BaseTool):
         collection_name: str = "documentation"
     ) -> Optional[str]:
         """
-        Retrieve full document content by concatenating all chunks from Qdrant.
+        Recupera el contenido completo de un documento concatenando todos sus fragmentos de Qdrant.
 
         Args:
-            file_id: UUID of the file
-            collection_name: Name of the collection
+            file_id: UUID del archivo.
+            collection_name: Nombre de la colección.
 
         Returns:
-            Concatenated content string or None if not found
+            Cadena de contenido concatenado o None si no se encuentra.
         """
         try:
             # Filter by file_id
@@ -363,28 +334,32 @@ class RAGTool(BaseTool):
         enable_contextual_retrieval: bool = settings.ENABLE_CONTEXTUAL_RETRIEVAL,
         context_generation_model: str = settings.CONTEXT_GENERATION_MODEL,
         file_repo: Optional[FileRepository] = None,
+        # Parámetros adicionales aceptados pero no usados por RAG (para compatibilidad con fast-path)
+        action: Optional[str] = None,
+        target: Optional[str] = None,
     ) -> ToolResult:
-        """Execute RAG search with optional re-ranking and hybrid search.
+        """
+        Ejecuta la búsqueda RAG con re-ranking opcional y búsqueda híbrida.
 
         Args:
-            query: Search query.
-            collections: Collection names to search.
-            k: Number of results.
-            score_threshold: Minimum score threshold.
-            filters: Optional metadata filters.
-            enable_rerank: Enable cross-encoder re-ranking.
-            rerank_top_k: Number of results after re-ranking (defaults to k).
-            search_mode: 'semantic', 'lexical', 'hybrid', or 'full_document'.
-            hybrid_alpha: Weight for semantic vs lexical (0.0=lexical, 1.0=semantic).
-            enable_parent_retrieval: Enable parent document retrieval.
-            parent_mode: Parent retrieval mode ('full_parent' or 'windowed').
-            embedding_model: Embedding model to use.
-            enable_contextual_retrieval: Enable contextual retrieval.
-            context_generation_model: Model for context generation.
-            file_repo: Optional file repository for context.
+            query: Consulta de búsqueda.
+            collections: Nombres de las colecciones en las que buscar.
+            k: Número de resultados.
+            score_threshold: Umbral mínimo de puntaje.
+            filters: Filtros opcionales de metadatos.
+            enable_rerank: Habilitar re-ranking con cross-encoder.
+            rerank_top_k: Número de resultados tras el re-ranking.
+            search_mode: 'semantic', 'lexical', 'hybrid' o 'full_document'.
+            hybrid_alpha: Peso para semántica vs léxica (0.0=léxica, 1.0=semántica).
+            enable_parent_retrieval: Habilitar recuperación de documentos padre.
+            parent_mode: Modo de recuperación padre ('full_parent' o 'windowed').
+            embedding_model: Modelo de embedding a usar.
+            enable_contextual_retrieval: Habilitar recuperación contextual.
+            context_generation_model: Modelo para la generación de contexto.
+            file_repo: Repositorio de archivos opcional.
 
         Returns:
-            ToolResult with search results.
+            ToolResult con los resultados de la búsqueda.
         """
         # Create timer for metrics
         timer = self._performance_timer.create_timer()
@@ -661,22 +636,21 @@ class RAGTool(BaseTool):
             )
             return ToolResult(success=False, data=None, error=str(e))
 
-    # =============================================================================
-    # Helper Methods
-    # =============================================================================
+    # Métodos Auxiliares
 
     async def _generate_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
-        """Generate embedding for text using model from database with caching.
+        """
+        Genera el embedding para el texto dado usando caché.
 
         Args:
-            text: Text to generate embedding for
-            model: Optional embedding model name
+            text: Texto para generar el embedding.
+            model: Nombre opcional del modelo de embedding.
 
         Returns:
-            List of embedding vectors
+            Lista de vectores de embedding.
 
         Raises:
-            EmbeddingError: If embedding generation fails
+            EmbeddingError: Si la generación del embedding falla.
         """
         try:
             # Check cache first
@@ -705,7 +679,7 @@ class RAGTool(BaseTool):
         score_threshold: float,
         filters: Optional[Dict[str, Any]],
     ) -> List[Dict]:
-        """Search in a single collection and return standardized result dicts."""
+        """Busca en una única colección y retorna diccionarios de resultados estandarizados."""
         # Build Qdrant filter if provided
         qdrant_filter = None
         if filters:
@@ -752,7 +726,7 @@ class RAGTool(BaseTool):
         query: str,
         k: int,
     ) -> List[Dict]:
-        """Search using BM25 lexical search."""
+        """Busca usando búsqueda léxica BM25."""
         try:
             # Load or get cached BM25 index
             bm25_index = await self._get_bm25_index(collection_name)  # ← Await
@@ -786,7 +760,7 @@ class RAGTool(BaseTool):
         alpha: float,
         filters: Optional[Dict[str, Any]],
     ) -> List[Dict]:
-        """Search using hybrid approach (semantic + lexical)."""
+        """Busca usando un enfoque híbrido (semántica + léxica)."""
         try:
             # Perform semantic search
             semantic_results = await self._search_collection(
@@ -830,8 +804,7 @@ class RAGTool(BaseTool):
 
     async def _get_bm25_index(self, collection_name: str) -> Optional[BM25Index]:
         """
-        Get or load BM25 index for a collection (thread-safe).
-        Uses double-checked locking pattern to prevent race conditions.
+        Obtiene o carga el índice BM25 para una colección (seguro para hilos).
         """
         # Fast path: check cache without lock
         if collection_name in self._bm25_indexes:
@@ -880,14 +853,14 @@ class RAGTool(BaseTool):
     def _expand_to_parents(self, results: List[Dict], parent_mode: str = "full_parent") -> List[
         Dict]:
         """
-        Expand child chunks to parent documents.
+        Expande fragmentos hijos a documentos padre.
 
         Args:
-            results: List of search results (child chunks)
-            parent_mode: 'full_parent' or 'windowed'
+            results: Lista de resultados de búsqueda (fragmentos hijos).
+            parent_mode: 'full_parent' o 'windowed'.
 
         Returns:
-            List of parent documents with deduplicated results
+            Lista de documentos padre con resultados deduplicados.
         """
         if not results:
             return results
@@ -967,8 +940,7 @@ class RAGTool(BaseTool):
         embedding_model: Optional[str]
     ) -> List[Dict]:
         """
-        Enhanced search with multiple fallback strategies for better recall.
-        Universal solution that works for any type of query that has low semantic similarity.
+        Búsqueda mejorada con múltiples estrategias de fallback para mejorar la recuperación.
         """
         all_results = []
 
@@ -1105,12 +1077,7 @@ class RAGTool(BaseTool):
 
     def _enrich_results_with_content(self, results: List[Dict], query: str) -> List[Dict]:
         """
-        Enrique metadata-based results with content-based results when metadata is insufficient.
-
-        This addresses the issue where metadata has generic values (like "autor") but
-        the actual information is in the document content. Since we now validate metadata
-        during ingestion, this method is primarily for backward compatibility with existing
-        documents that may have generic metadata values.
+        Enriquece los resultados basados en metadatos con resultados basados en contenido si los metadatos son insuficientes.
         """
         if not results:
             return results
@@ -1164,18 +1131,14 @@ class RAGTool(BaseTool):
 
     async def _fetch_full_document(self, collection_name: str, filters: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Fetch all chunks for a file and reconstruct the full document.
+        Obtiene todos los fragmentos de un archivo y reconstruye el documento completo.
 
         Args:
-            collection_name: Name of the Qdrant collection.
-            filters: Dictionary containing 'file' or 'file_id'.
+            collection_name: Nombre de la colección de Qdrant.
+            filters: Diccionario que contiene 'file' o 'file_id'.
 
         Returns:
-            Dict representing the full document with combined content.
-
-        Raises:
-            DatabaseError: If fetching fails
-            TimeoutError: If operation times out
+            Diccionario que representa el documento completo con contenido combinado.
         """
         try:
             qdrant_filter = Filter(must=[
@@ -1281,8 +1244,7 @@ class RAGTool(BaseTool):
 
     def _content_has_meaningful_info(self, content: str, query: str) -> bool:
         """
-        Check if content contains meaningful information related to the query.
-        Universal solution that works for any type of query without hardcoding.
+        Verifica si el contenido incluye información relevante relacionada con la consulta.
         """
         import re
 
@@ -1321,8 +1283,7 @@ class RAGTool(BaseTool):
 
     def _expand_query_universal(self, query: str) -> List[str]:
         """
-        Universal query expansion that works for any type of query.
-        Adds common context terms that improve semantic matching.
+        Expansión universal de consultas para mejorar la coincidencia semántica.
         """
         expansions = []
         query_lower = query.lower()
@@ -1389,7 +1350,7 @@ class RAGTool(BaseTool):
         hybrid_alpha: float,
         embedding_model: Optional[str]
     ) -> List[Dict]:
-        """Search collection with specified mode"""
+        """Busca en la colección con el modo especificado."""
         if search_mode == "hybrid":
             # Generate query vector for hybrid search
             query_vector = await self._generate_embedding(query, model=embedding_model)
@@ -1428,8 +1389,7 @@ class RAGTool(BaseTool):
         embedding_model: Optional[str]
     ) -> List[Dict]:
         """
-        Universal hybrid search with lexical filtering for keyword matching.
-        Works for any type of query by using the query terms themselves for filtering.
+        Búsqueda híbrida universal con filtrado léxico.
         """
         # Generate query vector
         query_vector = await self._generate_embedding(query, model=embedding_model)
@@ -1466,8 +1426,7 @@ class RAGTool(BaseTool):
 
     def _extract_keywords(self, query: str) -> List[str]:
         """
-        Extract meaningful keywords from query for lexical filtering.
-        This is a universal approach that works for any type of query.
+        Extrae palabras clave significativas de la consulta para el filtrado léxico.
         """
         import re
 
@@ -1498,16 +1457,14 @@ class RAGTool(BaseTool):
         # Return unique keywords
         return list(dict.fromkeys(keywords))
 
-    # =============================================================================
-    # Professional API Methods
-    # =============================================================================
+    # Métodos de API Profesional
 
     async def health_check(self) -> HealthCheckResult:
         """
-        Perform comprehensive health check of RAG tool components.
+        Realiza una verificación de salud integral de los componentes de la herramienta RAG.
 
         Returns:
-            HealthCheckResult with status of all components
+            HealthCheckResult con el estado de todos los componentes.
         """
         embedding_service = await get_embedding_service()
         return await self._health_checker.perform_health_check(
@@ -1518,28 +1475,22 @@ class RAGTool(BaseTool):
 
     def get_metrics(self, count: int = 100) -> List[SearchMetrics]:
         """
-        Get recent search metrics.
+        Obtiene las métricas de búsqueda recientes.
 
         Args:
-            count: Number of recent metrics to return
+            count: Número de métricas recientes a retornar.
 
         Returns:
-            List of recent search metrics
+            Lista de métricas de búsqueda recientes.
         """
         return self._metrics_collector.get_recent_metrics(count)
 
     def get_metrics_summary(self) -> Dict[str, Any]:
         """
-        Get summary of all metrics.
+        Obtiene un resumen de todas las métricas.
 
         Returns:
-            Dictionary with metrics summary including:
-            - average_execution_time_ms
-            - success_rate
-            - cache_hit_rate
-            - average_score
-            - strategy_distribution
-            - total_searches
+            Diccionario con el resumen de métricas.
         """
         return {
             "average_execution_time_ms": self._metrics_collector.get_average_execution_time(),
@@ -1551,35 +1502,31 @@ class RAGTool(BaseTool):
         }
 
     def clear_metrics(self) -> None:
-        """Clear all collected metrics."""
+        """Limpia todas las métricas recolectadas."""
         self._metrics_collector.clear_metrics()
 
     def get_cache_stats(self) -> Dict[str, Any]:
         """
-        Get embedding cache statistics.
+        Obtiene estadísticas de la caché de embeddings.
 
         Returns:
-            Dictionary with cache statistics including:
-            - size: Current number of cached embeddings
-            - capacity: Maximum cache capacity
-            - ttl_seconds: Time-to-live for cache entries
-            - usage_percent: Percentage of cache used
+            Diccionario con estadísticas de caché.
         """
         return self._embedding_cache.get_stats()
 
     def clear_cache(self) -> None:
-        """Clear embedding cache."""
+        """Limpia la caché de embeddings."""
         self._embedding_cache.clear()
 
     async def validate_collections_exist(self, collections: List[str]) -> ValidationResult:
         """
-        Validate that specified collections exist in Qdrant.
+        Valida que las colecciones especificadas existan en Qdrant.
 
         Args:
-            collections: List of collection names to validate
+            collections: Lista de nombres de colecciones a validar.
 
         Returns:
-            ValidationResult with validation results
+            ValidationResult con el resultado de la validación.
         """
         errors = []
         warnings = []
@@ -1607,13 +1554,13 @@ class RAGTool(BaseTool):
 
     async def get_collection_stats(self, collection_name: str) -> Optional[Dict[str, Any]]:
         """
-        Get statistics for a specific collection.
+        Obtiene estadísticas para una colección específica.
 
         Args:
-            collection_name: Name of the collection
+            collection_name: Nombre de la colección.
 
         Returns:
-            Dictionary with collection statistics or None if collection doesn't exist
+            Diccionario con estadísticas de la colección o None si no existe.
         """
         try:
             collection_info = await self.qdrant.get_collection(collection_name)

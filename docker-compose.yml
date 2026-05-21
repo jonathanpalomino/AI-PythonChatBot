@@ -45,6 +45,41 @@ services:
       - redis_data:/data
     command: redis-server --appendonly yes
 
+  # Celery Worker
+  celery-worker:
+    build: .
+    container_name: chatbot-celery-worker
+    command: celery -A src.config.celery:app worker -Q default -l info
+    volumes:
+      - .:/app
+      - ./data:/app/data
+    environment:
+      - DATABASE_URL=postgresql://chatbot_ia:chatbot_ia@postgres:5432/chatbot_ia_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - QDRANT_URL=http://qdrant:6333
+    depends_on:
+      - redis
+      - qdrant
+      - postgres
+    networks:
+      - chatbot-network
+
+  # Flower (Monitoreo Celery)
+  flower:
+    build: .
+    container_name: chatbot-flower
+    command: celery -A src.config.celery:app flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/1
+    depends_on:
+      - celery-worker
+    networks:
+      - chatbot-network
+
   # Ollama (Optional - for local LLMs)
   # Uncomment if you want Ollama in Docker
   # ollama:

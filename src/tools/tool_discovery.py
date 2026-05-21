@@ -57,11 +57,11 @@ class ToolDiscovery:
 
                             # Validar que tenga los atributos necesarios
                             if self._is_valid_tool_class(obj):
-                                tool_name = obj.name if hasattr(obj, 'name') else name
-                                discovered_tools[tool_name] = obj
-
                                 # Crear instancia para obtener metadata
                                 instance = obj()
+
+                                tool_name = getattr(instance, 'name', name)
+                                discovered_tools[tool_name] = obj
 
                                 # Guardar metadata
                                 self._tool_metadata[tool_name] = {

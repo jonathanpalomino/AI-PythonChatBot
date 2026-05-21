@@ -166,9 +166,9 @@ class FileService:
                 progress = int((uploaded_size / total_size) * 100)
                 # Store progress in Redis if available
                 try:
-                    import redis
-                    redis_client = redis.Redis.from_url(settings.REDIS_URL)
-                    redis_client.set(str(file_record.id), progress)
+                    import redis.asyncio as redis
+                    redis_client = redis.from_url(settings.REDIS_URL)
+                    await redis_client.set(str(file_record.id), progress)
                 except:
                     pass
 
@@ -269,13 +269,13 @@ class FileService:
     async def get_upload_progress(self, file_id: UUID) -> dict:
         """Get upload and processing progress for a file"""
         try:
-            import redis
-            redis_client = redis.Redis.from_url(settings.REDIS_URL)
+            import redis.asyncio as redis
+            redis_client = redis.from_url(settings.REDIS_URL)
 
-            progress = redis_client.get(str(file_id))
+            progress = await redis_client.get(str(file_id))
             progress = int(progress) if progress else 0
 
-            processing_progress = redis_client.get(f"processing:{file_id}")
+            processing_progress = await redis_client.get(f"processing:{file_id}")
             processing_progress = int(processing_progress) if processing_progress else 0
 
             # Determine status

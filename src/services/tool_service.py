@@ -54,6 +54,14 @@ class ToolService:
         self.conversation_repo = conversation_repo
         self.file_repo = file_repo
 
+    async def commit(self):
+        """Commit transaction across all repositories (shared session)."""
+        await self.custom_tool_repo.commit()
+
+    async def rollback(self):
+        """Rollback transaction across all repositories (shared session)."""
+        await self.custom_tool_repo.rollback()
+
     # =============================================================================
     # Tool Registry Operations
     # =============================================================================
@@ -89,9 +97,28 @@ class ToolService:
     def get_tool_details(self, tool_name: str) -> dict:
         """Get detailed information about a specific tool"""
         logger.info(f"Getting tool details: {tool_name}")
+
+        # Try to get from registry first
         tool = tool_registry.get(tool_name)
+
+        # If not in registry, try to create instance directly from discovery
+        if not tool:
+            from src.tools.tool_discovery import get_tool_class
+            tool_class = get_tool_class(tool_name)
+            if tool_class:
+                tool = tool_class()
+
         if not tool:
             raise ValueError(f"Tool '{tool_name}' not found")
+
+        # Get available actions if the tool has them
+        available_actions = []
+        if hasattr(tool, 'get_available_actions'):
+            try:
+                available_actions = tool.get_available_actions()
+            except Exception as e:
+                logger.error(f"Error getting available actions for tool {tool_name}: {e}")
+                available_actions = []
 
         return {
             "name": tool.name,
@@ -99,6 +126,7 @@ class ToolService:
             "category": tool.category.value,
             "enabled_by_default": tool.enabled_by_default,
             "requires_context": tool.requires_context,
+            "available_actions": available_actions,
             "parameters": [
                 {
                     "name": p.name,
@@ -529,8 +557,9 @@ class ToolService:
             description=data.description,
             tool_type=data.tool_type,
             configuration=data.configuration,
+            intent_examples=data.intent_examples,
+            content_prompt=data.content_prompt,
             visibility=data.visibility,
-            conversation_id=conversation_id,
             is_active=data.is_active
         )
 
@@ -543,6 +572,23 @@ class ToolService:
         )
         custom_tool_executor._name = custom_tool.name
         tool_registry.register(custom_tool_executor)
+        
+        # Registrar en IntentRouter dinámicamente
+        if custom_tool.intent_examples or (custom_tool.configuration and "intent_actions" in custom_tool.configuration):
+            from src.services.intent.router import get_intent_router
+            router = await get_intent_router()
+            
+            # Extraer intent_actions de la configuración si existe
+            intent_actions = None
+            if custom_tool.configuration and "intent_actions" in custom_tool.configuration:
+                intent_actions = custom_tool.configuration["intent_actions"]
+                
+            await router.register_custom_tool(
+                tool_name=custom_tool.name,
+                examples=custom_tool.intent_examples,
+                tool_type=str(custom_tool.tool_type),
+                intent_actions=intent_actions
+            )
 
         logger.info(f"Custom tool created and registered: {custom_tool.name}")
         return custom_tool
@@ -597,6 +643,10 @@ class ToolService:
             tool.tool_type = data.tool_type
         if data.configuration is not None:
             tool.configuration = data.configuration
+        if data.intent_examples is not None:
+            tool.intent_examples = data.intent_examples
+        if data.content_prompt is not None:
+            tool.content_prompt = data.content_prompt
         if data.visibility is not None:
             tool.visibility = data.visibility
         if data.is_active is not None:
@@ -604,6 +654,17 @@ class ToolService:
 
         # Repository handles flush/refresh internally
         tool = await self.custom_tool_repo.save(tool)
+        
+        # Registrar/actualizar en IntentRouter dinámicamente
+        if tool.intent_examples:
+            from src.services.intent.router import get_intent_router
+            router = await get_intent_router()
+            await router.register_custom_tool(
+                tool_name=tool.name,
+                examples=tool.intent_examples,
+                tool_type=str(tool.tool_type)
+            )
+            
         logger.info(f"Custom tool updated: {tool_id}")
         return tool
 

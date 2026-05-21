@@ -53,6 +53,7 @@ from src.services.processing.file_processor import FileProcessor
 from src.services.project_service import ProjectService
 from src.services.prompt_template_service import PromptTemplateService
 from src.services.tool_service import ToolService
+from src.services.collection_ingest_service import CollectionIngestService
 
 
 # =============================================================================
@@ -276,7 +277,7 @@ def get_project_service(
     )
 
 
-def get_redis_client():
+async def get_redis_client():
     """
     Get Redis client for progress tracking.
 
@@ -284,10 +285,10 @@ def get_redis_client():
         Redis client or None if unavailable
     """
     try:
-        import redis
+        import redis.asyncio as redis
         from src.config.settings import settings
 
-        return redis.Redis.from_url(settings.REDIS_URL)
+        return redis.from_url(settings.REDIS_URL)
     except Exception:
         return None
 
@@ -379,6 +380,21 @@ def get_tool_service(
         tool_configuration_repo=tool_configuration_repo,
         conversation_repo=conversation_repo,
         file_repo=file_repo,
+    )
+
+
+def get_collection_ingest_service(
+    file_repo: FileRepository = Depends(get_file_repository),
+    collection_repo: QdrantCollectionRepository = Depends(get_qdrant_collection_repository),
+    file_processor: FileProcessor = Depends(get_file_processor),
+    redis_client=Depends(get_redis_client),
+) -> CollectionIngestService:
+    """Factory for CollectionIngestService."""
+    return CollectionIngestService(
+        file_repo=file_repo,
+        collection_repo=collection_repo,
+        file_processor=file_processor,
+        redis_client=redis_client
     )
 
 

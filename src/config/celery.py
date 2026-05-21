@@ -14,7 +14,7 @@ celery_app = Celery(
     "pythonchatbot",
     broker=settings.CELERY_BROKER_URL,       # ej: redis://localhost:6379/1
     backend=settings.CELERY_RESULT_BACKEND,  # ej: redis://localhost:6379/2
-    include=["src.tasks.file_tasks"],
+    include=["src.tasks.file_tasks", "src.tasks.cleanup_tasks"],
 )
 
 # Expose default attribute for Celery autodiscovery
@@ -64,6 +64,15 @@ celery_app.conf.update(
     # Ruteo
     task_routes={
         "tasks.process_file": {"queue": "default"},
+        "tasks.cleanup_expired_tokens": {"queue": "default"},
+    },
+
+    # Programación de tareas periódicas (Celery Beat)
+    beat_schedule={
+        "cleanup-expired-tokens-every-6-hours": {
+            "task": "tasks.cleanup_expired_tokens",
+            "schedule": 21600.0,  # 6 horas en segundos
+        },
     },
 
     # Celery 6.x forward-compat: keep startup retry behavior

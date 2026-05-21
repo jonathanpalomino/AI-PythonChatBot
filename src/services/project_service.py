@@ -69,6 +69,14 @@ class ProjectService:
         self.file_processor = file_processor
         self.logger = logger
 
+    async def commit(self):
+        """Commit current transaction using repository's session."""
+        await self.project_repo.commit()
+
+    async def rollback(self):
+        """Rollback current transaction using repository's session."""
+        await self.project_repo.rollback()
+
     async def create_project(self, data: ProjectCreate):
         """
         Create a new project.

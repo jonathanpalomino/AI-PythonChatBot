@@ -18,7 +18,7 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 
 from src.config.settings import settings
-from src.models.models import Base
+from src.models import Base
 
 # =============================================================================
 # Sync Engine & Session
@@ -75,9 +75,45 @@ AsyncSessionLocal = async_sessionmaker(
 # Database Initialization
 # =============================================================================
 
+def sync_postgres_enums(engine):
+    """
+    Sincroniza dinámicamente los valores de los Enums de SQLAlchemy con PostgreSQL.
+    Añade valores nuevos al ENUM sin necesidad de borrar y recrear la base de datos.
+    """
+    from sqlalchemy import text
+    
+    if engine.dialect.name != "postgresql":
+        return
+
+    try:
+        with engine.execution_options(isolation_level="AUTOCOMMIT").connect() as conn:
+            for table in Base.metadata.tables.values():
+                for column in table.columns:
+                    if hasattr(column.type, 'enums') and column.type.name:
+                        enum_name = column.type.name
+                        # Comprobar si existe el tipo en Postgres
+                        result = conn.execute(
+                            text("SELECT 1 FROM pg_type WHERE typname = :name"), 
+                            {"name": enum_name}
+                        ).scalar()
+                        
+                        if result:
+                            # Añadir cada valor de forma segura
+                            for value in column.type.enums:
+                                stmt = text(f"ALTER TYPE {enum_name} ADD VALUE IF NOT EXISTS '{value}'")
+                                try:
+                                    conn.execute(stmt)
+                                except Exception as e:
+                                    # En caso de que el valor ya exista u otro error menor
+                                    pass
+    except Exception as e:
+        print(f"⚠️  Error sincronizando enums con PostgreSQL: {e}")
+
+
 def init_db():
     """Initialize database - create all tables"""
     print("🔧 Initializing database...")
+    sync_postgres_enums(engine)
     Base.metadata.create_all(bind=engine)
     print("✅ Database initialized")
 

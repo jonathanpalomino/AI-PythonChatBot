@@ -3,15 +3,7 @@
 # Professional Obsidian Vault Tool with Advanced Features
 # =============================================================================
 """
-Professional Obsidian Vault Tool with advanced features:
-- Note caching with TTL
-- Vault structure validation
-- Multi-vault support
-- Performance metrics
-- Incremental loading support
-- Advanced filtering
-- Export capabilities
-- Detailed error handling
+Herramienta para cargar bóvedas (vaults) de Obsidian con soporte para caché, validación de estructura y filtrado avanzado.
 """
 
 import json
@@ -26,12 +18,10 @@ from src.tools.base_tool import BaseTool, ToolCategory, ToolParameter, ToolResul
 from src.utils.logger import get_logger
 
 
-# =============================================================================
-# Enums and Data Classes
-# =============================================================================
+# Enums y Clases de Datos
 
 class OutputFormat(Enum):
-    """Output formats for Obsidian notes."""
+    """Formatos de salida para las notas de Obsidian."""
     QDRANT_CHUNKS = "qdrant_chunks"
     FULL_NOTES = "full_notes"
     MARKDOWN = "markdown"
@@ -40,7 +30,7 @@ class OutputFormat(Enum):
 
 
 class CacheStrategy(Enum):
-    """Caching strategies for notes."""
+    """Estrategias de almacenamiento en caché para notas."""
     NO_CACHE = "no_cache"
     MEMORY_CACHE = "memory_cache"
     FILE_CACHE = "file_cache"
@@ -48,7 +38,7 @@ class CacheStrategy(Enum):
 
 @dataclass
 class CacheConfig:
-    """Configuration for note caching."""
+    """Configuración para el almacenamiento en caché de notas."""
     strategy: CacheStrategy = CacheStrategy.MEMORY_CACHE
     ttl: int = 3600  # seconds (1 hour)
     max_size: int = 500  # max number of cached notes
@@ -56,7 +46,7 @@ class CacheConfig:
 
 @dataclass
 class FilterConfig:
-    """Configuration for note filtering."""
+    """Configuración para el filtrado de notas."""
     tags: Optional[List[str]] = None
     date_range: Optional[Dict[str, str]] = None  # {"start": "2024-01-01", "end": "2024-12-31"}
     note_types: Optional[List[str]] = None  # ["atomic", "moc", "canvas", etc.
@@ -66,7 +56,7 @@ class FilterConfig:
 
 @dataclass
 class PerformanceMetrics:
-    """Performance metrics for vault loading."""
+    """Métricas de rendimiento para la carga de bóvedas."""
     vaults_loaded: int = 0
     notes_loaded: int = 0
     total_load_time: float = 0.0
@@ -78,24 +68,10 @@ class PerformanceMetrics:
     wikilinks_found: int = 0
 
 
-# =============================================================================
-# Professional Obsidian Note Tool
-# =============================================================================
+# Herramienta de Notas de Obsidian Profesional
 
 class ObsidianNoteTool(BaseTool):
-    """
-    Professional Obsidian Vault Tool with advanced features.
-
-    Features:
-    - Note caching with TTL
-    - Vault structure validation
-    - Multi-vault support
-    - Performance metrics
-    - Incremental loading support
-    - Advanced filtering
-    - Export capabilities
-    - Detailed error handling
-    """
+    """Herramienta para gestionar bóvedas de Obsidian con funciones avanzadas."""
 
     def __init__(self):
         self.logger = get_logger(__name__)
@@ -107,9 +83,7 @@ class ObsidianNoteTool(BaseTool):
         self._active_vaults: Dict[str, Path] = {}
         super().__init__()
 
-    # =========================================================================
-    # Tool Definition
-    # =========================================================================
+    # Definición de la Herramienta
 
     @property
     def name(self) -> str:
@@ -117,15 +91,7 @@ class ObsidianNoteTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return """Professional Obsidian vault loader with advanced features:
-- Note caching with TTL
-- Vault structure validation
-- Multi-vault support
-- Performance metrics
-- Incremental loading support
-- Advanced filtering (tags, dates, note types)
-- Export capabilities (Markdown, JSON, HTML)
-- Detailed error handling"""
+        return "Cargador profesional de bóvedas de Obsidian con soporte para caché, validación, filtrado y exportación."
 
     @property
     def category(self) -> ToolCategory:
@@ -144,21 +110,21 @@ class ObsidianNoteTool(BaseTool):
             ToolParameter(
                 name="vault_path",
                 type="string",
-                description="Absolute path to Obsidian vault root directory",
+                description="Ruta absoluta al directorio raíz de la bóveda de Obsidian.",
                 required=True,
                 example="C:/Users/user/Documents/MyVault"
             ),
             ToolParameter(
                 name="note_names",
                 type="array",
-                description="Optional list of specific note names to load (without .md extension)",
+                description="Lista opcional de nombres de notas específicas a cargar (sin extensión .md).",
                 required=False,
                 example=["Servicios", "ServerGroups", "Arquitectura"]
             ),
             ToolParameter(
                 name="include_graph",
                 type="boolean",
-                description="Include bidirectional graph metadata (backlinks, incoming/outgoing links)",
+                description="Incluir metadatos del grafo bidireccional (backlinks, enlaces entrantes/salientes).",
                 required=False,
                 default=True,
                 example=True
@@ -166,7 +132,7 @@ class ObsidianNoteTool(BaseTool):
             ToolParameter(
                 name="resolve_transclusions",
                 type="boolean",
-                description="Resolve ![[transclusions]] by loading embedded content",
+                description="Resolver ![[transclusiones]] cargando el contenido incrustado.",
                 required=False,
                 default=True,
                 example=True
@@ -174,7 +140,7 @@ class ObsidianNoteTool(BaseTool):
             ToolParameter(
                 name="output_format",
                 type="string",
-                description="Output format: 'qdrant_chunks', 'full_notes', 'markdown', 'json', 'html'",
+                description="Formato de salida: 'qdrant_chunks', 'full_notes', 'markdown', 'json', 'html'.",
                 required=False,
                 default="full_notes",
                 enum=["qdrant_chunks", "full_notes", "markdown", "json", "html"],
@@ -183,7 +149,7 @@ class ObsidianNoteTool(BaseTool):
             ToolParameter(
                 name="max_notes",
                 type="integer",
-                description="Maximum number of notes to load (prevents loading huge vaults)",
+                description="Número máximo de notas a cargar (evita la carga de bóvedas masivas).",
                 required=False,
                 default=100,
                 example=50
@@ -217,7 +183,7 @@ class ObsidianNoteTool(BaseTool):
             ToolParameter(
                 name="incremental",
                 type="boolean",
-                description="Load only notes modified since last load (requires cache)",
+                description="Cargar solo las notas modificadas desde la última carga (requiere caché).",
                 required=False,
                 default=False,
                 example=False
@@ -225,7 +191,7 @@ class ObsidianNoteTool(BaseTool):
             ToolParameter(
                 name="validate_structure",
                 type="boolean",
-                description="Validate vault structure before loading",
+                description="Validar la estructura de la bóveda antes de cargar.",
                 required=False,
                 default=True,
                 example=True
@@ -233,15 +199,13 @@ class ObsidianNoteTool(BaseTool):
             ToolParameter(
                 name="export_path",
                 type="string",
-                description="Path to export notes (for markdown/json/html formats)",
+                description="Ruta para exportar notas (para formatos markdown/json/html).",
                 required=False,
                 example="C:/Users/user/Documents/exported_notes"
             )
         ]
 
-    # =========================================================================
-    # Main Execution Method
-    # =========================================================================
+    # Ejecución Principal
 
     async def execute(
         self,
@@ -258,7 +222,7 @@ class ObsidianNoteTool(BaseTool):
         export_path: Optional[str] = None,
         **kwargs
     ) -> ToolResult:
-        """Execute Obsidian vault loading with professional features"""
+        """Ejecuta la carga de la bóveda de Obsidian con funciones profesionales."""
 
         try:
             # Validate inputs
@@ -412,24 +376,20 @@ class ObsidianNoteTool(BaseTool):
                 error=f"Failed to load vault: {str(e)}"
             )
 
-    # =========================================================================
-    # Configuration Methods
-    # =========================================================================
+    # Configuración
 
     def _apply_cache_config(self, cache_config: Dict[str, Any]):
-        """Apply cache configuration"""
+        """Aplica la configuración de caché."""
         self._cache_config = CacheConfig(
             strategy=CacheStrategy(cache_config.get("strategy", "memory_cache")),
             ttl=cache_config.get("ttl", 3600),
             max_size=cache_config.get("max_size", 500)
         )
 
-    # =========================================================================
-    # Validation Methods
-    # =========================================================================
+    # Validación
 
     def _validate_vault_structure(self, vault_path: str) -> Dict[str, Any]:
-        """Validate Obsidian vault structure"""
+        """Valida la estructura de una bóveda de Obsidian."""
         errors = []
 
         vault_path_obj = Path(vault_path)
@@ -461,16 +421,14 @@ class ObsidianNoteTool(BaseTool):
             "errors": errors
         }
 
-    # =========================================================================
-    # Filter Methods
-    # =========================================================================
+    # Filtrado
 
     def _apply_filters(
         self,
         notes: List[Any],
         filter_config: Dict[str, Any]
     ) -> List[Any]:
-        """Apply filters to notes"""
+        """Aplica filtros a las notas."""
         filtered_notes = notes
 
         # Filter by tags
@@ -517,7 +475,7 @@ class ObsidianNoteTool(BaseTool):
         start_date: datetime,
         end_date: datetime
     ) -> bool:
-        """Check if note is in date range"""
+        """Verifica si una nota está dentro del rango de fechas."""
         note_date = note.base_document.metadata.get("created")
         if not note_date:
             return True
@@ -534,7 +492,7 @@ class ObsidianNoteTool(BaseTool):
         min_links: Optional[int],
         max_links: Optional[int]
     ) -> bool:
-        """Check if note is in link count range"""
+        """Verifica si una nota está dentro del rango de número de enlaces."""
         link_count = len(note.wikilinks) + len(note.backlinks)
 
         if min_links is not None and link_count < min_links:
@@ -545,9 +503,7 @@ class ObsidianNoteTool(BaseTool):
 
         return True
 
-    # =========================================================================
-    # Export Methods
-    # =========================================================================
+    # Exportación
 
     async def _export_notes(
         self,
@@ -555,7 +511,7 @@ class ObsidianNoteTool(BaseTool):
         export_path: str,
         output_format: str
     ) -> Dict[str, Any]:
-        """Export notes to specified format"""
+        """Exporta notas al formato especificado."""
         try:
             export_path_obj = Path(export_path)
             export_path_obj.mkdir(parents=True, exist_ok=True)
@@ -587,9 +543,7 @@ class ObsidianNoteTool(BaseTool):
                 "error": str(e)
             }
 
-    # =========================================================================
-    # Output Formatting Methods
-    # =========================================================================
+    # Formateo de Salida
 
     def _format_as_qdrant_chunks(self, notes) -> dict:
         """Format notes as Qdrant chunks"""
@@ -744,12 +698,10 @@ class ObsidianNoteTool(BaseTool):
         html_lines.extend(["</body>", "</html>"])
         return "\n".join(html_lines)
 
-    # =========================================================================
-    # Performance Metrics Methods
-    # =========================================================================
+    # Métricas de Rendimiento
 
     def _get_performance_metrics(self) -> Dict[str, Any]:
-        """Get current performance metrics"""
+        """Obtiene las métricas de rendimiento actuales."""
         avg_load_time = (
             self._metrics.total_load_time / self._metrics.vaults_loaded
             if self._metrics.vaults_loaded > 0 else 0
@@ -770,15 +722,13 @@ class ObsidianNoteTool(BaseTool):
         }
 
     def reset_metrics(self):
-        """Reset performance metrics"""
+        """Restablece las métricas de rendimiento."""
         self._metrics = PerformanceMetrics()
 
-    # =========================================================================
-    # Format Output Method
-    # =========================================================================
+    # Formateo para LLM
 
     def format_output(self, result: ToolResult) -> str:
-        """Format tool output for LLM consumption"""
+        """Formatea la salida de la herramienta para el consumo del LLM."""
         if not result.success:
             return f"❌ Error loading Obsidian vault: {result.error}"
 

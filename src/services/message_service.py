@@ -34,7 +34,15 @@ class MessageService:
             message_repo: MessageRepository instance
         """
         self.message_repo = message_repo
-    
+
+    async def commit(self):
+        """Commit current transaction using repository's session."""
+        await self.message_repo.commit()
+
+    async def rollback(self):
+        """Rollback current transaction using repository's session."""
+        await self.message_repo.rollback()
+
     async def get_message(self, message_id: UUID) -> Optional[Message]:
         """Get message by ID (solo lectura)"""
         logger.debug(f"Retrieving message: {message_id}")

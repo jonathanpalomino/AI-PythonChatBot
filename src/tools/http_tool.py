@@ -3,16 +3,7 @@
 # Professional HTTP Request Tool with Advanced Features
 # =============================================================================
 """
-Professional HTTP Request Tool with advanced features:
-- Automatic retries with exponential backoff
-- Rate limiting
-- Response caching
-- JSON schema validation
-- Multipart/form-data support
-- Streaming support
-- Performance metrics
-- Detailed error handling
-- WebSocket support
+Herramienta para realizar peticiones HTTP con soporte para reintentos, caché, límites de tasa y validación.
 """
 
 import asyncio
@@ -30,12 +21,10 @@ from src.tools.base_tool import BaseTool, ToolCategory, ToolParameter, ToolResul
 from src.utils.logger import get_logger
 
 
-# =============================================================================
-# Enums and Data Classes
-# =============================================================================
+# Enums y Clases de Datos
 
 class RetryStrategy(Enum):
-    """Retry strategies for failed requests."""
+    """Estrategias de reintento para peticiones fallidas."""
     EXPONENTIAL_BACKOFF = "exponential_backoff"
     LINEAR_BACKOFF = "linear_backoff"
     FIXED_DELAY = "fixed_delay"
@@ -43,7 +32,7 @@ class RetryStrategy(Enum):
 
 
 class CacheStrategy(Enum):
-    """Caching strategies."""
+    """Estrategias de almacenamiento en caché."""
     NO_CACHE = "no_cache"
     MEMORY_CACHE = "memory_cache"
     ETAG_CACHE = "etag_cache"
@@ -51,7 +40,7 @@ class CacheStrategy(Enum):
 
 @dataclass
 class RetryConfig:
-    """Configuration for retry behavior."""
+    """Configuración para el comportamiento de reintentos."""
     max_retries: int = 3
     strategy: RetryStrategy = RetryStrategy.EXPONENTIAL_BACKOFF
     initial_delay: float = 1.0  # seconds
@@ -62,7 +51,7 @@ class RetryConfig:
 
 @dataclass
 class CacheConfig:
-    """Configuration for response caching."""
+    """Configuración para el almacenamiento en caché de respuestas."""
     strategy: CacheStrategy = CacheStrategy.MEMORY_CACHE
     ttl: int = 300  # seconds
     max_size: int = 100  # max number of cached responses
@@ -70,7 +59,7 @@ class CacheConfig:
 
 @dataclass
 class RateLimitConfig:
-    """Configuration for rate limiting."""
+    """Configuración para el límite de tasa (rate limiting)."""
     requests_per_second: float = 10.0
     requests_per_minute: float = 100.0
     burst_size: int = 20
@@ -78,7 +67,7 @@ class RateLimitConfig:
 
 @dataclass
 class PerformanceMetrics:
-    """Performance metrics for HTTP requests."""
+    """Métricas de rendimiento para peticiones HTTP."""
     request_count: int = 0
     success_count: int = 0
     failure_count: int = 0
@@ -91,9 +80,7 @@ class PerformanceMetrics:
     cache_misses: int = 0
 
 
-# =============================================================================
-# HTTP Error Codes
-# =============================================================================
+# Códigos de Error HTTP
 
 HTTP_ERROR_DESCRIPTIONS = {
     400: "Bad Request - The server cannot process the request due to client error",
@@ -110,25 +97,10 @@ HTTP_ERROR_DESCRIPTIONS = {
 }
 
 
-# =============================================================================
-# Professional HTTP Tool
-# =============================================================================
+# Herramienta HTTP Profesional
 
 class HTTPTool(BaseTool):
-    """
-    Professional HTTP Request Tool with advanced features.
-
-    Features:
-    - Automatic retries with exponential backoff
-    - Rate limiting
-    - Response caching
-    - JSON schema validation
-    - Multipart/form-data support
-    - Streaming support
-    - Performance metrics
-    - Detailed error handling
-    - WebSocket support
-    """
+    """Herramienta para realizar peticiones HTTP con funciones avanzadas."""
 
     def __init__(self):
         self.logger = get_logger(__name__)
@@ -146,9 +118,7 @@ class HTTPTool(BaseTool):
 
         super().__init__()
 
-    # =========================================================================
-    # Tool Definition
-    # =========================================================================
+    # Definición de la Herramienta
 
     @property
     def name(self) -> str:
@@ -156,15 +126,7 @@ class HTTPTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return """Professional HTTP request tool with advanced features:
-- Automatic retries with exponential backoff
-- Rate limiting
-- Response caching
-- JSON schema validation
-- Multipart/form-data support
-- Streaming support
-- Performance metrics
-- Detailed error handling"""
+        return "Herramienta profesional para peticiones HTTP con soporte para reintentos, caché, validación y métricas."
 
     @property
     def category(self) -> ToolCategory:
@@ -179,14 +141,14 @@ class HTTPTool(BaseTool):
             ToolParameter(
                 name="url",
                 type="string",
-                description="Full URL for HTTP request (must include http:// or https://)",
+                description="URL completa para la petición (debe incluir http:// o https://).",
                 required=True,
                 example="https://api.example.com/data"
             ),
             ToolParameter(
                 name="method",
                 type="string",
-                description="HTTP method (GET, POST, PUT, DELETE, PATCH)",
+                description="Método HTTP (GET, POST, PUT, DELETE, PATCH).",
                 required=True,
                 enum=["GET", "POST", "PUT", "DELETE", "PATCH"],
                 example="GET"
@@ -194,7 +156,7 @@ class HTTPTool(BaseTool):
             ToolParameter(
                 name="headers",
                 type="object",
-                description="HTTP headers as key-value pairs",
+                description="Encabezados HTTP como pares clave-valor.",
                 required=False,
                 default={},
                 example={"Accept": "application/json"}
@@ -202,7 +164,7 @@ class HTTPTool(BaseTool):
             ToolParameter(
                 name="params",
                 type="object",
-                description="Query parameters for GET requests",
+                description="Parámetros de consulta para peticiones GET.",
                 required=False,
                 default={},
                 example={"page": 1, "limit": 10}
@@ -210,7 +172,7 @@ class HTTPTool(BaseTool):
             ToolParameter(
                 name="body",
                 type="object",
-                description="Request body (for POST, PUT, PATCH)",
+                description="Cuerpo de la petición (para POST, PUT, PATCH).",
                 required=False,
                 default=None,
                 example={"key": "value"}
@@ -218,7 +180,7 @@ class HTTPTool(BaseTool):
             ToolParameter(
                 name="timeout",
                 type="integer",
-                description="Request timeout in seconds (default: 30)",
+                description="Tiempo de espera en segundos (por defecto: 30).",
                 required=False,
                 default=30,
                 example=30
@@ -226,7 +188,7 @@ class HTTPTool(BaseTool):
             ToolParameter(
                 name="verify_ssl",
                 type="boolean",
-                description="Whether to verify SSL certificates (default: true)",
+                description="Si se deben verificar los certificados SSL (por defecto: true).",
                 required=False,
                 default=True,
                 example=True
@@ -288,7 +250,7 @@ class HTTPTool(BaseTool):
             ToolParameter(
                 name="stream",
                 type="boolean",
-                description="Whether to stream the response (default: false)",
+                description="Si se debe transmitir la respuesta por streaming (por defecto: false).",
                 required=False,
                 default=False
             ),
@@ -305,9 +267,7 @@ class HTTPTool(BaseTool):
             )
         ]
 
-    # =========================================================================
-    # Main Execution Method
-    # =========================================================================
+    # Ejecución Principal
 
     async def execute(
         self,
@@ -325,7 +285,7 @@ class HTTPTool(BaseTool):
         stream: bool = False,
         multipart: Optional[Dict[str, Any]] = None
     ) -> ToolResult:
-        """Execute HTTP request with professional features"""
+        """Ejecuta la petición HTTP con funciones profesionales."""
 
         try:
             # Validate inputs
@@ -490,9 +450,7 @@ class HTTPTool(BaseTool):
                 error=str(e)
             )
 
-    # =========================================================================
-    # Request with Retry Logic
-    # =========================================================================
+    # Lógica de Reintentos
 
     async def _make_request_with_retry(
         self,
@@ -506,7 +464,7 @@ class HTTPTool(BaseTool):
         stream: bool,
         multipart: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Make HTTP request with retry logic"""
+        """Realiza la petición HTTP con lógica de reintentos."""
 
         retry_count = 0
         last_error = None
@@ -577,7 +535,7 @@ class HTTPTool(BaseTool):
         stream: bool,
         multipart: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Make a single HTTP request"""
+        """Realiza una única petición HTTP."""
 
         start_time = datetime.utcnow()
 
@@ -679,9 +637,7 @@ class HTTPTool(BaseTool):
                 "bytes_received": len(response.content)
             }
 
-    # =========================================================================
-    # Configuration Methods
-    # =========================================================================
+    # Configuración
 
     def _apply_retry_config(self, retry_config: Dict[str, Any]):
         """Apply retry configuration"""
@@ -712,9 +668,7 @@ class HTTPTool(BaseTool):
 
         return min(delay, self._retry_config.max_delay)
 
-    # =========================================================================
-    # Cache Methods
-    # =========================================================================
+    # Métodos de Caché
 
     def _generate_cache_key(
         self,
@@ -761,9 +715,7 @@ class HTTPTool(BaseTool):
             "expires_at": datetime.utcnow() + timedelta(seconds=self._cache_config.ttl)
         }
 
-    # =========================================================================
-    # Rate Limiting Methods
-    # =========================================================================
+    # Métodos de Límite de Tasa (Rate Limiting)
 
     def _check_rate_limit(self) -> bool:
         """Check if request is within rate limits"""
@@ -788,9 +740,7 @@ class HTTPTool(BaseTool):
         self._request_timestamps.append(now)
         return True
 
-    # =========================================================================
-    # JSON Schema Validation
-    # =========================================================================
+    # Validación de Esquema JSON
 
     def _validate_json_schema(
         self,

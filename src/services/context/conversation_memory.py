@@ -9,8 +9,8 @@ Automatically indexes messages and retrieves relevant context from past conversa
 from typing import List, Dict, Any, Optional
 from uuid import UUID
 
-from ollama import Client as OllamaClient
-from qdrant_client import QdrantClient
+from ollama import AsyncClient as OllamaClient
+from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 
 from src.config.settings import settings, get_qdrant_config
@@ -27,12 +27,12 @@ _qdrant_client = None
 _ollama_client = None
 
 
-def get_qdrant_client() -> QdrantClient:
+def get_qdrant_client() -> AsyncQdrantClient:
     """Get or create singleton Qdrant client"""
     global _qdrant_client
     if _qdrant_client is None:
         qdrant_config = get_qdrant_config()
-        _qdrant_client = QdrantClient(**qdrant_config)
+        _qdrant_client = AsyncQdrantClient(**qdrant_config)
     return _qdrant_client
 
 

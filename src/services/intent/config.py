@@ -22,6 +22,9 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from enum import Enum
 
+# Import CodebaseAction como fuente única de verdad para action values
+from src.config.intent_patterns import CodebaseAction
+
 # =============================================================================
 # Enums y Tipos Base
 # =============================================================================
@@ -47,7 +50,9 @@ class IntentDefinition:
         category: Categoría del intent
         description: Descripción para humanos y LLM
         target_tool: Nombre del tool a ejecutar
-        action_name: Action específica del tool (opcional)
+        action_name: Action específica del tool (para backward compatibility)
+        codebase_action: Código de CodebaseAction (ver src/config/intent_patterns.py)
+                        Este campo centraliza el mapeo intent -> CodebaseAction
         examples_es: Ejemplos en español para embeddings
         examples_en: Ejemplos en inglés para embeddings
         requires_target: Si necesita extraer un símbolo/target
@@ -69,6 +74,9 @@ class IntentDefinition:
     # CAMPOS OPCIONALES (con default) - DEBEN IR DESPUÉS
     # =========================================================================
     action_name: Optional[str] = None
+    # Código de acción de CodebaseAction (ver src/config/intent_patterns.py)
+    # Este campo centraliza el mapeo intent -> CodebaseAction
+    codebase_action: Optional[str] = None
     examples_es: List[str] = field(default_factory=list)
     examples_en: List[str] = field(default_factory=list)
     requires_target: bool = False
@@ -76,6 +84,7 @@ class IntentDefinition:
     default_params: Dict[str, Any] = field(default_factory=dict)
     confidence_threshold: float = 0.65
     priority: int = 5  # 0-10, mayor = más prioritario
+    requires_thinking: bool = False  # False por defecto (fast path)
 
 # =============================================================================
 # REGISTRO DE INTENTS (Source of Truth)
@@ -93,6 +102,7 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         description="Contar número de métodos o funciones en archivos",
         target_tool="codebase_tool",
         action_name="count_methods",
+        codebase_action=CodebaseAction.BASIC_ANALYZE_FILE,
         examples_es=[
             "cuántos métodos tiene",
             "cuántas funciones hay",
@@ -102,6 +112,19 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
             "contar funciones",
             "cuántos def hay",
             "total de métodos",
+            # Sin tildes (cobertura qwen3 local / teclado sin ES)
+            "cuantos metodos tiene",
+            "cuantos metodos hay",
+            "cuantas funciones tiene",
+            "cuantas funciones hay",
+            "numero de metodos",
+            "numero de funciones",
+            "cuantos def tiene",
+            "cuantos def hay",
+            "total de metodos",
+            "contar metodos",
+            "que metodos tiene",
+            "metodos del archivo",
         ],
         examples_en=[
             "how many methods",
@@ -113,7 +136,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={"format": "markdown"},
         confidence_threshold=0.70,
-        priority=10
+        priority=10,
+        requires_thinking=False,  # AST ya tiene la respuesta
     ),
 
     "count_classes": IntentDefinition(
@@ -122,12 +146,20 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         description="Contar número de clases en archivos",
         target_tool="codebase_tool",
         action_name="count_classes",
+        codebase_action=CodebaseAction.BASIC_ANALYZE_FILE,
         examples_es=[
             "cuántas clases tiene",
             "número de clases",
             "cuenta las clases",
             "cantidad de clases",
             "total de clases",
+            # Sin tildes
+            "cuantas clases tiene",
+            "cuantas clases hay",
+            "numero de clases",
+            "total de clases",
+            "clases del archivo",
+            "que clases tiene",
         ],
         examples_en=[
             "how many classes",
@@ -137,7 +169,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={"format": "markdown"},
         confidence_threshold=0.70,
-        priority=10
+        priority=10,
+        requires_thinking=False,
     ),
 
     "list_methods": IntentDefinition(
@@ -146,6 +179,7 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         description="Listar nombres de métodos/funciones",
         target_tool="codebase_tool",
         action_name="list_methods",
+        codebase_action=CodebaseAction.BASIC_ANALYZE_FILE,
         examples_es=[
             "lista los métodos",
             "enumera las funciones",
@@ -154,6 +188,15 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
             "dame los nombres de los métodos",
             "listame las funciones",
             "cuáles son los métodos",
+            # Sin tildes
+            "lista los metodos",
+            "que metodos tiene",
+            "muestra los metodos",
+            "dame los metodos",
+            "cuales son los metodos",
+            "listame los metodos",
+            "nombre de los metodos",
+            "nombre de las funciones",
         ],
         examples_en=[
             "list methods",
@@ -165,7 +208,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={"include_docstrings": False, "format": "markdown"},
         confidence_threshold=0.68,
-        priority=9
+        priority=9,
+        requires_thinking=False,
     ),
 
     "list_classes": IntentDefinition(
@@ -174,6 +218,7 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         description="Listar nombres de clases",
         target_tool="codebase_tool",
         action_name="list_classes",
+        codebase_action=CodebaseAction.BASIC_ANALYZE_FILE,
         examples_es=[
             "lista las clases",
             "qué clases tiene",
@@ -181,6 +226,11 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
             "enumera las clases",
             "dame las clases",
             "cuáles son las clases",
+            # Sin tildes
+            "lista las clases",
+            "que clases tiene",
+            "cuales son las clases",
+            "muestra las clases",
         ],
         examples_en=[
             "list classes",
@@ -191,7 +241,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={"format": "markdown"},
         confidence_threshold=0.68,
-        priority=9
+        priority=9,
+        requires_thinking=False,
     ),
 
     "get_method_content": IntentDefinition(
@@ -200,6 +251,7 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         description="Obtener código fuente de método o función específica",
         target_tool="codebase_tool",
         action_name="get_method",
+        codebase_action=CodebaseAction.GET_METHOD_CONTENT,
         requires_target=True,
         examples_es=[
             "muéstrame el método authenticate",
@@ -219,23 +271,6 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
             "ver el código de",
             "cómo está hecho",
             "dame la implementación de",
-            # Variantes con nombres concretos de métodos (snake_case)
-            "dame el codigo de create_template",
-            "dame el codigo de delete_template",
-            "dame el codigo de list_templates",
-            "dame el codigo de get_template",
-            "dame el codigo de update_template",
-            "dame el codigo de validate_user",
-            "dame el codigo de create_order",
-            "dame el codigo de process_payment",
-            "dame el codigo de send_email",
-            "dame el codigo de get_user",
-            "muéstrame el codigo de create_template",
-            "quiero ver el codigo de list_templates",
-            "mostrame la función create_template",
-            "dame el método create_template",
-            "ver el código de create_template",
-            "código de create_template",
         ],
         examples_en=[
             "show method authenticate",
@@ -254,7 +289,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={"format": "markdown", "include_docstrings": True},
         confidence_threshold=0.55,  # Bajado de 0.60 → 0.55 para cubrir variantes con nombres concretos
-        priority=10
+        priority=10,
+        requires_thinking=False,  # Solo formatear código
     ),
 
     "get_class_content": IntentDefinition(
@@ -263,6 +299,7 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         description="Obtener código fuente de clase específica",
         target_tool="codebase_tool",
         action_name="get_class",
+        codebase_action=CodebaseAction.ANALYZE_FILE,
         requires_target=True,
         examples_es=[
             "muéstrame la clase User",
@@ -283,7 +320,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={"format": "markdown", "include_docstrings": True},
         confidence_threshold=0.70,
-        priority=9
+        priority=9,
+        requires_thinking=False,
     ),
 
     "search_symbol": IntentDefinition(
@@ -292,6 +330,7 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         description="Búsqueda fuzzy de símbolos (métodos/clases/funciones)",
         target_tool="codebase_tool",
         action_name="search_symbol",
+        codebase_action=CodebaseAction.FIND_DEFINITION,
         requires_target=True,
         examples_es=[
             "busca el símbolo auth",
@@ -310,7 +349,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={"format": "markdown"},
         confidence_threshold=0.65,
-        priority=7
+        priority=7,
+        requires_thinking=True,
     ),
 
     "file_summary": IntentDefinition(
@@ -319,12 +359,18 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         description="Resumen estructural de archivo (clases, métodos, LOC, imports)",
         target_tool="codebase_tool",
         action_name="file_summary",
+        codebase_action=CodebaseAction.BASIC_ANALYZE_FILE,
         examples_es=[
             "resume el archivo",
             "estructura del archivo",
             "qué contiene el archivo",
             "overview del código",
             "resumen de la estructura",
+            # Sin tildes
+            "que contiene el archivo",
+            "que hay en el archivo",
+            "resumen del archivo",
+            "de que trata el archivo",
         ],
         examples_en=[
             "summarize file",
@@ -335,7 +381,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={"format": "markdown"},
         confidence_threshold=0.65,
-        priority=6
+        priority=6,
+        requires_thinking=True,
     ),
 
     # =========================================================================
@@ -348,6 +395,7 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         description="Análisis profundo de calidad de código (metrics, smells, security)",
         target_tool="codebase_tool",
         action_name="analyze_quality",
+        codebase_action=CodebaseAction.ANALYZE_QUALITY,
         requires_target=True,
         examples_es=[
             "analiza la calidad del código",
@@ -370,7 +418,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={},
         confidence_threshold=0.68,
-        priority=8
+        priority=8,
+        requires_thinking=True,
     ),
 
     "explain_code": IntentDefinition(
@@ -379,6 +428,7 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         description="Explicación detallada de qué hace un código",
         target_tool="codebase_tool",
         action_name="explain",
+        codebase_action=CodebaseAction.EXPLAIN,
         requires_target=True,
         examples_es=[
             "qué hace este código",
@@ -398,7 +448,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={},
         confidence_threshold=0.65,
-        priority=7
+        priority=7,
+        requires_thinking=True,
     ),
 
     # =========================================================================
@@ -411,6 +462,7 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         description="Encontrar definición de símbolo (dónde está definido)",
         target_tool="codebase_tool",
         action_name="find_definition",
+        codebase_action=CodebaseAction.FIND_DEFINITION,
         requires_target=True,
         examples_es=[
             "dónde está definido authenticate",
@@ -429,7 +481,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={},
         confidence_threshold=0.70,
-        priority=9
+        priority=9,
+        requires_thinking=True,
     ),
 
     "find_references": IntentDefinition(
@@ -438,6 +491,7 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         description="Encontrar referencias/usos de un símbolo",
         target_tool="codebase_tool",
         action_name="find_references",
+        codebase_action=CodebaseAction.FIND_REFERENCES,
         requires_target=True,
         examples_es=[
             "dónde se usa authenticate",
@@ -456,7 +510,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={},
         confidence_threshold=0.68,
-        priority=8
+        priority=8,
+        requires_thinking=True,
     ),
 
     "get_callers": IntentDefinition(
@@ -465,6 +520,7 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         description="Obtener qué funciones llaman a un símbolo",
         target_tool="codebase_tool",
         action_name="get_callers",
+        codebase_action="get_callers",
         requires_target=True,
         examples_es=[
             "qué llama a authenticate",
@@ -481,7 +537,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={},
         confidence_threshold=0.68,
-        priority=7
+        priority=7,
+        requires_thinking=False,
     ),
 
     "get_dependencies": IntentDefinition(
@@ -490,6 +547,7 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         description="Obtener dependencias de un archivo o módulo",
         target_tool="codebase_tool",
         action_name="get_dependencies",
+        codebase_action="get_dependencies",
         examples_es=[
             "qué importa el archivo",
             "dependencias del módulo",
@@ -504,7 +562,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={},
         confidence_threshold=0.65,
-        priority=6
+        priority=6,
+        requires_thinking=True,
     ),
 
     # =========================================================================
@@ -532,7 +591,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={"k": 10, "score_threshold": 0.3},
         confidence_threshold=0.60,
-        priority=5
+        priority=5,
+        requires_thinking=True,
     ),
 
     "conversational": IntentDefinition(
@@ -554,7 +614,8 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
         ],
         default_params={"k": 5, "score_threshold": 0.4},
         confidence_threshold=0.55,
-        priority=4
+        priority=4,
+        requires_thinking=True,
     ),
     # =============================================================================
     # AGREGAR en config.py - INTENT_REGISTRY
@@ -588,7 +649,62 @@ INTENT_REGISTRY: Dict[str, IntentDefinition] = {
             "how many methods in the other",
         ],
         confidence_threshold=0.65,
-        priority=8
+        priority=8,
+        requires_thinking=True,
+    ),
+
+    # =========================================================================
+    # CODE REWRITING INTENTS (para CodebaseTool - safe versioned export)
+    # =========================================================================
+
+    "export_refactored": IntentDefinition(
+        name="export_refactored",
+        category=IntentCategory.CODE_ANALYSIS,
+        description="Aplicar correcciones al código y generar un archivo refactorizado descargable",
+        target_tool="codebase_tool",
+        action_name="export_refactored",
+        codebase_action=CodebaseAction.EXPORT_REFACTORED,
+        requires_target=True,
+        examples_es=[
+            "aplica los cambios y exporta el archivo",
+            "corrige el método y genera una nueva versión",
+            "genera el archivo refactorizado",
+            "aplica la mejora y dame el archivo",
+            "corrígelo y exporta",
+            "aplica el fix y exporta",
+            "genera versión mejorada del archivo",
+            "refactoriza y descarga",
+            "crea una versión corregida",
+            "exporta el código refactorizado",
+            "aplica el refactoring y exporta",
+            "quiero el archivo con los cambios",
+            "me gusta, aplícalo y exporta el archivo",
+            "sí, aplícalo",
+            "hazlo y genera el archivo",
+            "aplica los cambios sugeridos",
+            "genera el descargable con el fix",
+        ],
+        examples_en=[
+            "apply the fix and export the file",
+            "generate refactored version",
+            "apply changes and download file",
+            "create fixed version of the file",
+            "export refactored code",
+            "apply refactoring and export",
+            "generate improved version",
+            "fix and export",
+            "looks good, apply it and export",
+            "yes, do it and generate the file",
+            "apply suggested changes",
+        ],
+        target_patterns=[
+            r"(?:método|metodo|función|funcion|method|function)\s+([\w_]+)",
+            r"(?:de|del|of)\s+([\w_]+)",
+        ],
+        default_params={"format": "markdown"},
+        confidence_threshold=0.55,
+        priority=9,
+        requires_thinking=True,
     ),
 
 }
@@ -711,6 +827,14 @@ def validate_intent_registry() -> List[str]:
         if intent.requires_target and not intent.target_patterns:
             issues.append(f"Intent '{name}': requires_target but no patterns")
 
+        # Check codebase_action for intents targeting codebase_tool
+        # NOTE: Algunos intents (como contextual_reference) no necesitan action específica,
+        # pero deberían tener codebase_action=None explícitamente para indicar que es intencional
+        if intent.target_tool == "codebase_tool" and intent.codebase_action is None:
+            # Allow None only if explicitly set (no action needed for this intent type)
+            # Por ahora, solo warn ya que estos intents usan memoria conversacional
+            pass
+
     return issues
 
 # Validación al importar
@@ -719,3 +843,42 @@ if _validation_issues:
     import warnings
     for issue in _validation_issues:
         warnings.warn(f"IntentRegistry validation: {issue}")
+
+# =============================================================================
+# HELPER: Mapeo centralizado intent -> CodebaseAction
+# =============================================================================
+# Esta función reemplaza los diccionarios duplicados en codebase_tool.py y tool_executor.py
+# Usa el campo codebase_action de cada IntentDefinition
+
+def get_intent_to_codebase_action() -> Dict[str, str]:
+    """
+    Construye el mapeo intent_name -> CodebaseAction directamente desde INTENT_REGISTRY.
+    Usa el campo codebase_action de cada IntentDefinition, haciendo de INTENT_REGISTRY
+    la única fuente de verdad para el routing intent -> acción.
+
+    Returns:
+        Dict con {intent_name: CodebaseAction_value} para todos los intents
+        que tienen codebase_action definido.
+
+    Ejemplo:
+        {
+            "count_methods": "basic_analyze_file",
+            "get_method_content": "get_method_content",
+            ...
+        }
+    """
+    return {
+        name: intent.codebase_action
+        for name, intent in INTENT_REGISTRY.items()
+        if intent.codebase_action is not None
+    }
+
+# Cache del mapeo para evitar reconstruirlo múltiples veces
+_INTENT_TO_CODEBASE_ACTION: Optional[Dict[str, str]] = None
+
+def get_intent_to_codebase_action_cached() -> Dict[str, str]:
+    """Versión cacheada de get_intent_to_codebase_action()."""
+    global _INTENT_TO_CODEBASE_ACTION
+    if _INTENT_TO_CODEBASE_ACTION is None:
+        _INTENT_TO_CODEBASE_ACTION = get_intent_to_codebase_action()
+    return _INTENT_TO_CODEBASE_ACTION

@@ -414,7 +414,14 @@ class  CustomToolExecutor(BaseTool):
             sig = inspect.signature(method)
             type_hints = get_type_hints(method)
 
-            # Get all parameter names from the method signature
+            # Check if method accepts **kwargs
+            has_var_keyword = any(param.kind == param.VAR_KEYWORD for param in sig.parameters.values())
+
+            if has_var_keyword:
+                # If method accepts **kwargs, pass all parameters
+                return params
+
+            # Otherwise, filter to named parameters only
             valid_params = {}
             for param_name, param_value in params.items():
                 if param_name in sig.parameters:

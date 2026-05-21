@@ -3,25 +3,21 @@
 # Base class for all tools
 # =============================================================================
 """
-Sistema base de tools extensible para el chatbot.
+Sistema base de herramientas (tools) extensible para el chatbot.
 
-v2.0 — Contratos estandarizados:
-- Logger automático por subclase (self.logger)
-- run() como Template Method con pipeline estándar
-- Hooks opcionales _before_execute / _after_execute
-- ExecutionContext: objeto estándar de contexto por request
-- required_dependencies: dependencias de infraestructura declaradas
-- file_dependent_actions: acciones que requieren file_ids declaradas
-- is_relevant(): relevancia contextual (reemplaza lógica hardcodeada en Orchestrator)
-- required_context_keys: qué keys de ExecutionContext consume la tool
-- llm_hint: hint al LLM cuando la tool está activa
-- get_intent_definitions(): intents que maneja la tool (para IntentRouter)
-- params_from_intent(): traducción IntentResult → parámetros de execute()
-- execution_stats: métricas básicas de uso
-
-COMPATIBILIDAD: Toda la API existente se mantiene sin cambios.
-Las subclases existentes (HTTPTool, RAGTool, CodebaseTool) no necesitan
-modificarse para seguir funcionando. Los nuevos contratos son opt-in via override.
+Contratos estandarizados:
+- Logger automático por subclase (self.logger).
+- run() como Template Method con pipeline estándar.
+- Hooks opcionales _before_execute / _after_execute.
+- ExecutionContext: objeto estándar de contexto por petición.
+- required_dependencies: dependencias de infraestructura declaradas.
+- file_dependent_actions: acciones que requieren file_ids.
+- is_relevant(): relevancia contextual.
+- required_context_keys: claves de ExecutionContext que consume la herramienta.
+- llm_hint: sugerencia al LLM cuando la herramienta está activa.
+- get_intent_definitions(): intents que maneja la herramienta.
+- params_from_intent(): traducción de intención a parámetros.
+- execution_stats: métricas básicas de uso.
 """
 
 import logging
@@ -47,7 +43,7 @@ _logger = logging.getLogger(__name__)
 # =============================================================================
 
 class ToolCategory(str, Enum):
-    """Tool categories"""
+    """Categorías de herramientas."""
     RAG = "rag"
     CODE = "code"
     DOCUMENT = "document"
@@ -58,7 +54,7 @@ class ToolCategory(str, Enum):
 
 @dataclass
 class ToolParameter:
-    """Tool parameter definition"""
+    """Definición de parámetro de herramienta."""
     name: str
     type: str  # "string", "integer", "boolean", "array", "object"
     description: str
@@ -70,7 +66,7 @@ class ToolParameter:
 
 @dataclass
 class ToolResult:
-    """Tool execution result"""
+    """Resultado de ejecución de herramienta."""
     success: bool
     data: Any
     error: Optional[str] = None
@@ -81,28 +77,15 @@ class ToolResult:
             self.metadata = {}
 
 
-# =============================================================================
-# ExecutionContext — Contexto estándar de ejecución por request (NUEVO v2.0)
-# =============================================================================
+# ExecutionContext — Contexto estándar de ejecución por petición
 
 @dataclass
 class ExecutionContext:
     """
-    Contexto de ejecución construido por el Orchestrator una vez por request.
+    Contexto de ejecución construido por el Orchestrator para cada petición.
 
-    Se pasa a is_relevant() y a los métodos que necesitan datos del request
-    sin que el Orchestrator tenga que conocer los internos de cada tool.
-
-    Attributes:
-        user_message:    Mensaje original del usuario.
-        conversation_id: UUID de la conversación activa.
-        file_ids:        Archivos adjuntos en el request actual.
-        target_file_id:  Archivo objetivo detectado (sticky context).
-        rag_metadata:    Metadata del resultado RAG previo, si existe.
-        collection_name: Colección Qdrant activa.
-        provider:        Provider LLM activo (ej: "openai", "anthropic", "local").
-        model:           Modelo LLM activo (ej: "gpt-4o", "qwen2.5:3b").
-        extra:           Datos adicionales arbitrarios para extensibilidad futura.
+    Se pasa a is_relevant() y a los métodos que necesitan datos de la petición
+    sin que el Orchestrator tenga que conocer los internos de cada herramienta.
     """
     user_message: str
     conversation_id: Optional[UUID] = None
@@ -115,32 +98,23 @@ class ExecutionContext:
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
-# =============================================================================
-# BaseTool — Clase base v2.0
-# =============================================================================
+# BaseTool — Clase base para herramientas
 
 class BaseTool(ABC):
     """
-    Clase base para todas las tools. v2.0.
+    Clase base para todas las herramientas.
 
-    NUEVOS CONTRATOS (todos tienen default seguro — opt-in via override):
-        - self.logger           : Logger automático, no requiere declaración en subclase.
+    Contratos disponibles:
+        - self.logger           : Logger automático.
         - run()                 : Template Method con pipeline estandarizado.
-        - required_dependencies : Infraestructura que la tool necesita.
-        - file_dependent_actions: Acciones que requieren file_ids.
+        - required_dependencies : Infraestructura necesaria.
+        - file_dependent_actions: Acciones que requieren archivos.
         - is_relevant()         : Condición de activación contextual.
-        - required_context_keys : Keys de ExecutionContext que la tool consume.
-        - llm_hint              : Hint de sistema para el LLM.
-        - get_intent_definitions: Intents que maneja la tool.
-        - params_from_intent()  : Traduce IntentResult → parámetros de execute().
-        - execution_stats       : Métricas básicas de uso.
-
-    API EXISTENTE (sin cambios):
-        - name, description, category (abstractos)
-        - enabled_by_default, requires_context, auto_discover
-        - get_parameters(), to_openai_function(), to_anthropic_tool()
-        - execute() (abstracto)
-        - validate_input(), format_output()
+        - required_context_keys : Claves de contexto consumidas.
+        - llm_hint              : Sugerencia de sistema para el LLM.
+        - get_intent_definitions: Intenciones manejadas.
+        - params_from_intent()  : Traduce intención a parámetros.
+        - execution_stats       : Métricas de uso.
     """
 
     # Atributo de clase para control de auto-discovery (sin cambios)
@@ -244,29 +218,6 @@ class BaseTool(ABC):
             }
         """
         return set()
-
-    async def is_relevant(self, context: ExecutionContext) -> bool:
-        """
-        Determina si esta tool debe activarse para el contexto dado.
-
-        Reemplaza el conocimiento hardcodeado en el Orchestrator sobre
-        cuándo activar cada tool (ej: inyección de hints por nombre de tool).
-
-        Default: True — siempre relevante si está habilitada.
-        Override para lógica específica de la tool.
-
-        Args:
-            context: ExecutionContext con los datos del request actual.
-
-        Returns:
-            True si la tool debe ejecutarse en este contexto.
-
-        Ejemplos:
-            CodebaseTool → return bool(context.file_ids or context.target_file_id)
-            HTTPTool     → return True
-            RAGTool      → return bool(context.file_ids or context.collection_name)
-        """
-        return True
 
     @property
     def required_context_keys(self) -> List[str]:
@@ -561,9 +512,7 @@ class BaseTool(ABC):
         """
         return result
 
-    # =========================================================================
-    # Tool Execution — Contrato existente (sin cambios)
-    # =========================================================================
+    # Ejecución de la herramienta
 
     @abstractmethod
     async def execute(self, **kwargs) -> ToolResult:
@@ -639,9 +588,7 @@ class BaseTool(ABC):
             return f"Error executing {self.name}: {result.error}"
         return str(result.data)
 
-    # =========================================================================
-    # Estadísticas de ejecución (NUEVO v2.0)
-    # =========================================================================
+    # Estadísticas de ejecución
 
     @property
     def execution_stats(self) -> Dict[str, Any]:
@@ -672,9 +619,7 @@ class BaseTool(ABC):
         self._total_execution_ms = 0.0
         self._error_count = 0
 
-    # =========================================================================
-    # Utility Methods (sin cambios)
-    # =========================================================================
+    # Métodos de utilidad
 
     def _validate_tool_definition(self):
         """Valida que la tool esté correctamente definida al instanciar."""
@@ -689,26 +634,14 @@ class BaseTool(ABC):
         return f"<{self.__class__.__name__}(name={self.name})>"
 
 
-# =============================================================================
-# ToolRegistry — Extendido para soportar contratos v2.0
-# =============================================================================
+# ToolRegistry — Registro de herramientas
 
 class ToolRegistry:
     """
-    Registry para gestionar las tools disponibles.
+    Registro para gestionar y consultar las herramientas disponibles.
 
-    NUEVO en v2.0:
-        - register() construye automáticamente el mapa intent → tool
-        - unregister() limpia intents de la tool al desregistrarla
-        - get_all_intents(): vista agregada de intents de todas las tools
-        - get_tool_for_intent(): tool responsable de un intent
-        - get_tools_with_llm_hints(): tools con hint para el LLM
-        - get_relevant_tools(): filtra tools activas por relevancia contextual
-
-    API EXISTENTE sin cambios:
-        - register, unregister, get, get_all, get_by_category
-        - get_enabled_by_default, list_names
-        - to_openai_functions, to_anthropic_tools
+    Maneja el registro de herramientas, la exportación a formatos de LLM
+    y la resolución de intenciones (intents) para el enrutamiento.
     """
 
     def __init__(self):
@@ -734,7 +667,7 @@ class ToolRegistry:
 
         self._tools[tool.name] = tool
 
-        # Registrar intents de la tool (NUEVO v2.0)
+        # Registrar intents de la herramienta
         intent_defs = tool.get_intent_definitions()
         if intent_defs:
             for intent_name in intent_defs:
@@ -759,7 +692,7 @@ class ToolRegistry:
         if tool_name not in self._tools:
             return
 
-        # Limpiar intents de la tool (NUEVO v2.0)
+        # Limpiar intents de la herramienta
         tool = self._tools[tool_name]
         intent_defs = tool.get_intent_definitions()
         for intent_name in intent_defs:
@@ -795,9 +728,7 @@ class ToolRegistry:
         """Retorna los nombres de todas las tools registradas."""
         return list(self._tools.keys())
 
-    # -------------------------------------------------------------------------
-    # NUEVOS métodos v2.0 — Contratos declarativos
-    # -------------------------------------------------------------------------
+    # Contratos declarativos y métodos de resolución
 
     def get_all_intents(self) -> Dict[str, Any]:
         """
@@ -888,9 +819,7 @@ class ToolRegistry:
 
         return relevant
 
-    # -------------------------------------------------------------------------
-    # Métodos existentes para LLM (sin cambios)
-    # -------------------------------------------------------------------------
+    # Métodos de exportación para LLM
 
     def to_openai_functions(self, tool_names: Optional[List[str]] = None) -> List[Dict]:
         """

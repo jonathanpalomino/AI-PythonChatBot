@@ -32,6 +32,7 @@ env/
 ENV/
 env.bak/
 venv.bak/
+/.venv
 
 # IDEs
 .vscode/
@@ -92,3 +93,9 @@ docs/_build/
 /qdrant/.qdrant-initialized
 /data
 /redis
+
+# ML Models (large files, should be downloaded separately)
+models_cache/
+*.safetensors
+*.bin
+*.onnx

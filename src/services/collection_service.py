@@ -48,6 +48,14 @@ class CollectionService:
         self.qdrant_collection_repo = qdrant_collection_repo
         self._qdrant_client = None
 
+    async def commit(self):
+        """Commit current transaction using repository's session."""
+        await self.qdrant_collection_repo.commit()
+
+    async def rollback(self):
+        """Rollback current transaction using repository's session."""
+        await self.qdrant_collection_repo.rollback()
+
     @property
     def qdrant(self) -> QdrantClient:
         """Lazy initialization of Qdrant client"""

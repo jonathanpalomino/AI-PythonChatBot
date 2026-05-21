@@ -104,6 +104,13 @@ class Settings(BaseSettings):
     # Groq
     GROQ_API_KEY: Optional[str] = Field(None, description="Groq API key")
 
+    # Web Emulator (browser CDP emulation — Copilot 365, Grok, Kimi, etc.)
+    WEB_EMULATOR_ENABLED: bool = Field(False, description="Enable the Web Emulator provider (browser CDP)")
+    WEB_EMULATOR_REMOTE_DEBUGGING_PORT: int = Field(9222, description="Chrome DevTools Protocol port")
+    WEB_EMULATOR_TIMEOUT: int = Field(60000, description="Response timeout in milliseconds")
+    WEB_EMULATOR_RETRY_ATTEMPTS: int = Field(3, description="Retries per request if DOM fails")
+    WEB_EMULATOR_MAX_TABS: int = Field(20, description="Max concurrent browser tabs (LRU eviction)")
+
     # =============================================================================
     # File Storage
     # =============================================================================
@@ -131,6 +138,10 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: Optional[str] = None
     AWS_S3_BUCKET: Optional[str] = None
     AWS_REGION: str = "us-east-1"
+
+    SECRET_KEY: str = "change-me-in-production-min-32-chars"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # =============================================================================
     # API Settings
@@ -281,6 +292,54 @@ class Settings(BaseSettings):
     INTENT_CACHE_TTL: int = Field(
         3600,
         description="Time-to-live for intent cache entries in seconds"
+    )
+
+    # =============================================================================
+    # Git Provider Settings
+    # =============================================================================
+    BITBUCKET_API_URL: str = Field(
+        "https://api.bitbucket.org",
+        description="Bitbucket REST API base URL (override for self-hosted)"
+    )
+    BITBUCKET_API_TOKEN: Optional[str] = Field(
+        None,
+        description="Bitbucket app password in 'username:app_password' format"
+    )
+
+    GITHUB_API_URL: str = Field(
+        "https://api.github.com",
+        description="GitHub REST API base URL (override for GitHub Enterprise)"
+    )
+    GITHUB_API_TOKEN: Optional[str] = Field(
+        None,
+        description="GitHub personal access token"
+    )
+
+    GITLAB_API_URL: str = Field(
+        "https://gitlab.com/api/v4",
+        description="GitLab REST API base URL (override for self-hosted)"
+    )
+    GITLAB_API_TOKEN: Optional[str] = Field(
+        None,
+        description="GitLab personal access token"
+    )
+
+    # OAuth Bitbucket
+    BITBUCKET_CLIENT_ID: str = Field(
+        "",
+        description="Bitbucket OAuth consumer key (client ID)"
+    )
+    BITBUCKET_CLIENT_SECRET: str = Field(
+        "",
+        description="Bitbucket OAuth consumer secret (client secret)"
+    )
+    BITBUCKET_REDIRECT_URI: str = Field(
+        "https://tu-dominio/api/v1/oauth/bitbucket/callback",
+        description="Bitbucket OAuth callback redirect URI"
+    )
+    FERNET_KEY: str = Field(
+        "",
+        description="Fernet key for encrypting OAuth tokens (32-byte base64)"
     )
 
     # =============================================================================
